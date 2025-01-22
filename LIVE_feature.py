@@ -84,134 +84,243 @@ def create_tables(conn):
     """Create necessary tables in the SQLite database."""
     cursor = conn.cursor()
     cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS ball_by_ball (
-        id TEXT PRIMARY KEY,
-        innings_id TEXT,
-        innings_number INTEGER,
-        innings_order INTEGER,
-        innings_name TEXT,
-        batting_team_id TEXT,
-        progress_runs INTEGER,
-        progress_wickets INTEGER,
-        progress_score TEXT,
-        striker_participant_id TEXT,
-        striker_short_name TEXT,
-        striker_runs_scored INTEGER,
-        striker_balls_faced INTEGER,
-        non_striker_participant_id TEXT,
-        non_striker_short_name TEXT,
-        non_striker_runs_scored INTEGER,
-        non_striker_balls_faced INTEGER,
-        bowler_participant_id TEXT,
-        bowler_short_name TEXT,
-        over_number INTEGER,
-        ball_display_number INTEGER,
-        ball_time DATETIME,
-        runs_bat INTEGER,
-        wides INTEGER,
-        no_balls INTEGER,
-        leg_byes INTEGER,
-        byes INTEGER,
-        penalty_runs INTEGER,
-        short_description TEXT,
-        description TEXT,
-        fetched_time DATETIME
-    );
+        CREATE TABLE IF NOT EXISTS matches (
+            id TEXT PRIMARY KEY,
+            status TEXT,
+            status_id INTEGER,
+            team_a TEXT,
+            team_b TEXT,
+            season TEXT,
+            match_type TEXT,
+            match_type_id INTEGER,
+            is_ball_by_ball BOOLEAN,
+            result_text TEXT,
+            round_id TEXT,
+            grade_id TEXT,
+            venue_id TEXT,
+            start_datetime DATETIME,
+            FOREIGN KEY (round_id) REFERENCES rounds(id),
+            FOREIGN KEY (grade_id) REFERENCES grades(id),
+            FOREIGN KEY (venue_id) REFERENCES venues(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS players (
-        id TEXT PRIMARY KEY,
-        team_id TEXT,
-        name TEXT,
-        short_name TEXT,
-        role TEXT
-    );
+        CREATE TABLE IF NOT EXISTS ball_by_ball (
+            id TEXT PRIMARY KEY,
+            innings_id TEXT,
+            innings_number INTEGER,
+            innings_order INTEGER,
+            innings_name TEXT,
+            batting_team_id TEXT,
+            progress_runs INTEGER,
+            progress_wickets INTEGER,
+            progress_score TEXT,
+            striker_participant_id TEXT,
+            striker_short_name TEXT,
+            striker_runs_scored INTEGER,
+            striker_balls_faced INTEGER,
+            non_striker_participant_id TEXT,
+            non_striker_short_name TEXT,
+            non_striker_runs_scored INTEGER,
+            non_striker_balls_faced INTEGER,
+            bowler_participant_id TEXT,
+            bowler_short_name TEXT,
+            over_number INTEGER,
+            ball_display_number INTEGER,
+            ball_time DATETIME,
+            runs_bat INTEGER,
+            wides INTEGER,
+            no_balls INTEGER,
+            leg_byes INTEGER,
+            byes INTEGER,
+            penalty_runs INTEGER,
+            short_description TEXT,
+            description TEXT,
+            FOREIGN KEY (innings_id) REFERENCES innings(id),
+            FOREIGN KEY (batting_team_id) REFERENCES teams(id),
+            FOREIGN KEY (striker_participant_id) REFERENCES players(id),
+            FOREIGN KEY (non_striker_participant_id) REFERENCES players(id),
+            FOREIGN KEY (bowler_participant_id) REFERENCES players(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS innings (
-        id TEXT PRIMARY KEY,
-        match_id TEXT,
-        name TEXT,
-        innings_close_type TEXT,
-        innings_number INTEGER,
-        innings_order INTEGER,
-        batting_team_id TEXT,
-        is_declared BOOLEAN,
-        is_follow_on BOOLEAN,
-        byes_runs INTEGER,
-        leg_byes_runs INTEGER,
-        no_balls INTEGER,
-        wide_balls INTEGER,
-        penalties INTEGER,
-        total_extras INTEGER,
-        overs_bowled REAL,
-        runs_scored INTEGER,
-        number_of_wickets_fallen INTEGER
-    );
+        CREATE TABLE IF NOT EXISTS rounds (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            short_name TEXT
+        );
 
-    CREATE TABLE IF NOT EXISTS teams (
-        id TEXT PRIMARY KEY,
-        match_id TEXT,
-        display_name TEXT,
-        result_type_id INTEGER,
-        result_type TEXT,
-        won_toss BOOLEAN,
-        batted_first BOOLEAN,
-        is_home BOOLEAN,
-        score_text TEXT,
-        is_winner BOOLEAN
-    );
+        CREATE TABLE IF NOT EXISTS grades (
+            id TEXT PRIMARY KEY,
+            name TEXT
+        );
 
-    CREATE TABLE IF NOT EXISTS matches (
-        id TEXT PRIMARY KEY,
-        status TEXT,
-        status_id INTEGER,
-        team_a TEXT,
-        team_b TEXT,
-        season TEXT,
-        match_type TEXT,
-        match_type_id INTEGER,
-        is_ball_by_ball BOOLEAN,
-        result_text TEXT,
-        round_id TEXT,
-        grade_id TEXT,
-        venue_id TEXT,
-        start_datetime DATETIME
-    );
+        CREATE TABLE IF NOT EXISTS venues (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            line1 TEXT,
+            suburb TEXT,
+            post_code TEXT,
+            state_name TEXT,
+            country TEXT,
+            playing_surface_id TEXT,
+            FOREIGN KEY (playing_surface_id) REFERENCES playing_surfaces(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS rounds (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        short_name TEXT
-    );
+        CREATE TABLE IF NOT EXISTS playing_surfaces (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            latitude REAL,
+            longitude REAL
+        );
 
-    CREATE TABLE IF NOT EXISTS grades (
-        id TEXT PRIMARY KEY,
-        name TEXT
-    );
+        CREATE TABLE IF NOT EXISTS teams (
+            id TEXT,
+            match_id TEXT,
+            display_name TEXT,
+            result_type_id INTEGER,
+            result_type TEXT,
+            won_toss BOOLEAN,
+            batted_first BOOLEAN,
+            is_home BOOLEAN,
+            score_text TEXT,
+            is_winner BOOLEAN,
+            PRIMARY KEY (id, match_id),
+            FOREIGN KEY (match_id) REFERENCES matches(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS venues (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        line1 TEXT,
-        suburb TEXT,
-        post_code TEXT,
-        state_name TEXT,
-        country TEXT,
-        playing_surface_id TEXT
-    );
+        CREATE TABLE IF NOT EXISTS organisations (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            short_name TEXT,
+            logo_url TEXT
+        );
 
-    CREATE TABLE IF NOT EXISTS playing_surfaces (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        latitude REAL,
-        longitude REAL
-    );
+        CREATE TABLE IF NOT EXISTS players (
+            id TEXT PRIMARY KEY,
+            team_id TEXT,
+            name TEXT,
+            short_name TEXT,
+            role TEXT,
+            FOREIGN KEY (team_id) REFERENCES teams(id)
+        );
 
-    CREATE TABLE IF NOT EXISTS organisations (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        short_name TEXT,
-        logo_url TEXT
-    );
+        CREATE TABLE IF NOT EXISTS innings (
+            id TEXT PRIMARY KEY,
+            match_id TEXT,
+            name TEXT,
+            innings_close_type TEXT,
+            innings_number INTEGER,
+            innings_order INTEGER,
+            batting_team_id TEXT,
+            is_declared BOOLEAN,
+            is_follow_on BOOLEAN,
+            byes_runs INTEGER,
+            leg_byes_runs INTEGER,
+            no_balls INTEGER,
+            wide_balls INTEGER,
+            penalties INTEGER,
+            total_extras INTEGER,
+            overs_bowled REAL,
+            runs_scored INTEGER,
+            number_of_wickets_fallen INTEGER,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (batting_team_id) REFERENCES teams(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS batting_stats (
+            id TEXT PRIMARY KEY,
+            innings_id TEXT,
+            player_id TEXT,
+            bat_order INTEGER,
+            bat_instance INTEGER,
+            balls_faced INTEGER,
+            fours_scored INTEGER,
+            sixes_scored INTEGER,
+            runs_scored INTEGER,
+            batting_minutes INTEGER,
+            strike_rate REAL,
+            dismissal_type_id INTEGER,
+            dismissal_type TEXT,
+            dismissal_text TEXT,
+            FOREIGN KEY (innings_id) REFERENCES innings(id),
+            FOREIGN KEY (player_id) REFERENCES players(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS bowling_stats (
+            id TEXT PRIMARY KEY,
+            innings_id TEXT,
+            player_id TEXT,
+            bowl_order INTEGER,
+            overs_bowled REAL,
+            maidens_bowled INTEGER,
+            runs_conceded INTEGER,
+            wickets_taken INTEGER,
+            wide_balls INTEGER,
+            no_balls INTEGER,
+            economy REAL,
+            FOREIGN KEY (innings_id) REFERENCES innings(id),
+            FOREIGN KEY (player_id) REFERENCES players(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS fielding_stats (
+            id TEXT PRIMARY KEY,
+            innings_id TEXT,
+            player_id TEXT,
+            catches INTEGER,
+            wicket_keeper_catches INTEGER,
+            total_catches INTEGER,
+            unassisted_run_outs INTEGER,
+            assisted_run_outs INTEGER,
+            run_outs INTEGER,
+            stumpings INTEGER,
+            FOREIGN KEY (innings_id) REFERENCES innings(id),
+            FOREIGN KEY (player_id) REFERENCES players(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS fall_of_wickets (
+            id TEXT PRIMARY KEY,
+            innings_id TEXT,
+            player_id TEXT,
+            "order" INTEGER,
+            runs INTEGER,
+            FOREIGN KEY (innings_id) REFERENCES innings(id),
+            FOREIGN KEY (player_id) REFERENCES players(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS match_schedule (
+            id TEXT PRIMARY KEY,
+            match_id TEXT,
+            match_day INTEGER,
+            start_datetime DATETIME,
+            FOREIGN KEY (match_id) REFERENCES matches(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ladder (
+            id TEXT PRIMARY KEY,
+            grade_id TEXT,
+            team_id TEXT,
+            rank INTEGER,
+            played INTEGER,
+            points INTEGER,
+            bonus_points INTEGER,
+            quotient REAL,
+            net_run_rate REAL,
+            won INTEGER,
+            lost INTEGER,
+            ties INTEGER,
+            no_results INTEGER,
+            byes INTEGER,
+            forfeits INTEGER,
+            disqualifications INTEGER,
+            adjustments INTEGER,
+            runs_for INTEGER,
+            overs_faced REAL,
+            wickets_lost INTEGER,
+            runs_against INTEGER,
+            overs_bowled REAL,
+            wickets_taken INTEGER,
+            FOREIGN KEY (grade_id) REFERENCES grades(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id)
+        );
     ''')
     conn.commit()
 
@@ -238,9 +347,8 @@ def insert_ball_by_ball(cursor, ball, innings_id, fetched_time):
                 striker_participant_id, striker_short_name, striker_runs_scored, striker_balls_faced,
                 non_striker_participant_id, non_striker_short_name, non_striker_runs_scored, non_striker_balls_faced,
                 bowler_participant_id, bowler_short_name, over_number, ball_display_number, ball_time,
-                runs_bat, wides, no_balls, leg_byes, byes, penalty_runs, short_description, description,
-                fetched_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                runs_bat, wides, no_balls, leg_byes, byes, penalty_runs, short_description, description
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             ball_id,
             innings_id,
@@ -271,8 +379,7 @@ def insert_ball_by_ball(cursor, ball, innings_id, fetched_time):
             safe_get(ball, ['byes'], 0),
             safe_get(ball, ['penaltyRuns'], 0),
             safe_get(ball, ['shortDescription']),
-            safe_get(ball, ['description']),
-            fetched_time
+            safe_get(ball, ['description'])
         ))
         logging.info(f"Inserted new ball with ID {ball_id} at {safe_get(ball, ['ballTime'])}")
     except Exception as e:
@@ -280,7 +387,6 @@ def insert_ball_by_ball(cursor, ball, innings_id, fetched_time):
 
 
 def update_related_tables(cursor, ball, match_id):
-    """Update related tables (teams, players, etc.) if needed."""
     pass
 
 
@@ -295,14 +401,35 @@ def fetch_and_store_ball_data(conn, match_id):
 
     if teams_data:
         # Insert or update teams in the 'teams' table
-        for t in safe_get(teams_data, ['teams'], []):
-            team_id = safe_get(t, ['id'])
-            display_name = safe_get(t, ['displayName'])
-            # Insert or IGNORE to not duplicate
+        for team in safe_get(teams_data, ['teams'], []):
+            team_id = safe_get(team, ['id'])
+            display_name = safe_get(team, ['displayName'])
+            result_type_id = safe_get(team, ['resultTypeId'])
+            result_type = safe_get(team, ['resultType'])
+            won_toss = safe_get(team, ['wonToss'], False)
+            batted_first = safe_get(team, ['battedFirst'], False)
+            is_home = safe_get(team, ['isHome'], False)
+            score_text = safe_get(team, ['scoreText'])
+            is_winner = safe_get(team, ['isWinner'], False)
+
             cursor.execute('''
-                INSERT OR IGNORE INTO teams (id, match_id, display_name)
-                VALUES (?, ?, ?)
-            ''', (team_id, match_id, display_name))
+                            INSERT OR IGNORE INTO teams (
+                                id, match_id, display_name, 
+                                result_type_id, result_type, won_toss, batted_first, 
+                                is_home, score_text, is_winner
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                team_id,
+                match_id,
+                display_name,
+                result_type_id,
+                result_type,
+                won_toss,
+                batted_first,
+                is_home,
+                score_text,
+                is_winner
+            ))
 
     # 2) Fetch the ball-by-ball data
     balls_url = f"https://grassrootsapiproxy.cricket.com.au/scores/matches/{match_id}/balls?jsconfig=eccn%3Atrue"
@@ -313,14 +440,27 @@ def fetch_and_store_ball_data(conn, match_id):
         return
 
     fetched_time = datetime.utcnow()
-
+    insert_match(cursor, teams_data, "N/A")
     innings_list = safe_get(data, ['innings'], [])
     for innings in innings_list:
         innings_id = safe_get(innings, ['id'])
-        if not innings_id:
-            continue
+        name = safe_get(innings, ['name'])
+        innings_close_type = safe_get(innings, ['inningsCloseType'])
+        innings_number = safe_get(innings, ['inningsNumber'])
+        innings_order = safe_get(innings, ['inningsOrder'])
+        batting_team_id = safe_get(innings, ['battingTeamId'])
+        is_declared = safe_get(innings, ['isDeclared'], False)
+        is_follow_on = safe_get(innings, ['isFollowOn'], False)
+        byes_runs = safe_get(innings, ['byesRuns'], 0)
+        leg_byes_runs = safe_get(innings, ['legByesRuns'], 0)
+        no_balls = safe_get(innings, ['noBalls'], 0)
+        wide_balls = safe_get(innings, ['wideBalls'], 0)
+        penalties = safe_get(innings, ['penalties'], 0)
+        total_extras = safe_get(innings, ['totalExtras'], 0)
+        overs_bowled = safe_get(innings, ['oversBowled'], 0.0)
+        runs_scored = safe_get(innings, ['runsScored'], 0)
+        number_of_wickets_fallen = safe_get(innings, ['numberOfWicketsFallen'], 0)
 
-        # Insert/update innings
         cursor.execute('''
             INSERT OR IGNORE INTO innings (
                 id, match_id, name, innings_close_type, innings_number, innings_order,
@@ -331,32 +471,74 @@ def fetch_and_store_ball_data(conn, match_id):
         ''', (
             innings_id,
             match_id,
-            safe_get(innings, ['inningsName']),
-            safe_get(innings, ['inningsCloseType'], ''),
-            safe_get(innings, ['inningsNumber'], 0),
-            safe_get(innings, ['inningsOrder'], 0),
-            safe_get(innings, ['battingTeamId']),
-            safe_get(innings, ['isDeclared'], False),
-            safe_get(innings, ['isFollowOn'], False),
-            safe_get(innings, ['byesRuns'], 0),
-            safe_get(innings, ['legByesRuns'], 0),
-            safe_get(innings, ['noBalls'], 0),
-            safe_get(innings, ['wideBalls'], 0),
-            safe_get(innings, ['penalties'], 0),
-            safe_get(innings, ['totalExtras'], 0),
-            safe_get(innings, ['oversBowled'], 0.0),
-            safe_get(innings, ['runsScored'], 0),
-            safe_get(innings, ['numberOfWicketsFallen'], 0)
+            name,
+            innings_close_type,
+            innings_number,
+            innings_order,
+            batting_team_id,
+            is_declared,
+            is_follow_on,
+            byes_runs,
+            leg_byes_runs,
+            no_balls,
+            wide_balls,
+            penalties,
+            total_extras,
+            overs_bowled,
+            runs_scored,
+            number_of_wickets_fallen
         ))
 
         # Insert balls
         for ball in safe_get(innings, ['balls'], []):
             insert_ball_by_ball(cursor, ball, innings_id, fetched_time)
+
             update_related_tables(cursor, ball, match_id)
 
     conn.commit()
     logging.info(f"Fetched and stored latest data for match ID {match_id}")
 
+def insert_match(cursor, match_data, season):
+    try:
+        match_id = safe_get(match_data, ['id'])
+        status = safe_get(match_data, ['status'])
+        status_id = safe_get(match_data, ['statusId'])
+        team_a = safe_get(match_data, ['matchSummary', 'teams', 0, 'id'])
+        team_b = safe_get(match_data, ['matchSummary', 'teams', 1, 'id'])
+        match_type = safe_get(match_data, ['matchType'])
+        match_type_id = safe_get(match_data, ['matchTypeId'])
+        is_ball_by_ball = safe_get(match_data, ['isBallByBall'], False)
+        result_text = safe_get(match_data, ['matchSummary', 'resultText'])
+        round_id = safe_get(match_data, ['round', 'id'])
+        grade_id = safe_get(match_data, ['grade', 'id'])
+        venue_id = safe_get(match_data, ['venue', 'id'])
+        start_datetime = safe_get(match_data, ['matchSchedule', 0, 'startDateTime'])
+
+        cursor.execute('''
+            INSERT OR IGNORE INTO matches (
+                id, status, status_id, team_a, team_b, season, match_type, match_type_id, 
+                is_ball_by_ball, result_text, round_id, grade_id, venue_id, start_datetime
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            match_id,
+            status,
+            status_id,
+            team_a,
+            team_b,
+            season,
+            match_type,
+            match_type_id,
+            is_ball_by_ball,
+            result_text,
+            round_id,
+            grade_id,
+            venue_id,
+            start_datetime
+        ))
+        return is_ball_by_ball
+    except Exception as e:
+        logging.error(f"Error inserting match data for match ID {match_data.get('id')}: {e}")
+        return False
 
 def clear_database(conn):
     """Clear all data from the database tables."""
