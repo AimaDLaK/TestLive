@@ -15,9 +15,6 @@ import plotly.express as px
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-
-# --- Helper Functions ---
-
 def safe_get(d, keys, default=None):
     """Safely retrieve nested data from dictionaries or lists."""
     for key in keys:
@@ -79,11 +76,15 @@ def call_api(url):
         logging.error(f"API request failed: {e}")
         return {}
 
+def create_db():
+    try:
+        # Connect to SQLite3 database
+        db_path = r'try.db'
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
 
-def create_tables(conn):
-    """Create necessary tables in the SQLite database."""
-    cursor = conn.cursor()
-    cursor.executescript('''
+        # Create tables (same as original script)
+        cursor.executescript('''
         CREATE TABLE IF NOT EXISTS matches (
             id TEXT PRIMARY KEY,
             status TEXT,
@@ -321,182 +322,14 @@ def create_tables(conn):
             FOREIGN KEY (grade_id) REFERENCES grades(id),
             FOREIGN KEY (team_id) REFERENCES teams(id)
         );
-    ''')
-    conn.commit()
+        ''')
 
-
-def insert_ball_by_ball(cursor, ball, innings_id, fetched_time):
-    """Insert a single ball into the ball_by_ball table if it doesn't already exist."""
-    ball_id = safe_get(ball, ['id'], default=None)
-    if not ball_id:
-        logging.warning("Ball without ID encountered. Skipping insertion.")
-        return
-
-    # Check if the ball already exists
-    cursor.execute("SELECT id FROM ball_by_ball WHERE id = ?", (ball_id,))
-    if cursor.fetchone():
-        logging.info(f"Ball ID {ball_id} already exists. Skipping insertion.")
-        return
-
-    # Insert the ball
-    try:
-        cursor.execute('''
-            INSERT INTO ball_by_ball (
-                id, innings_id, innings_number, innings_order, innings_name,
-                batting_team_id, progress_runs, progress_wickets, progress_score,
-                striker_participant_id, striker_short_name, striker_runs_scored, striker_balls_faced,
-                non_striker_participant_id, non_striker_short_name, non_striker_runs_scored, non_striker_balls_faced,
-                bowler_participant_id, bowler_short_name, over_number, ball_display_number, ball_time,
-                runs_bat, wides, no_balls, leg_byes, byes, penalty_runs, short_description, description
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            ball_id,
-            innings_id,
-            safe_get(ball, ['overNumber'], 0),
-            safe_get(ball, ['overNumber'], 0),  # sometimes same as innings_number
-            safe_get(ball, ['inningsName']),
-            safe_get(ball, ['battingTeamId']),
-            safe_get(ball, ['progressRuns'], 0),
-            safe_get(ball, ['progressWickets'], 0),
-            safe_get(ball, ['progressScore']),
-            safe_get(ball, ['strikerParticipantId']),
-            safe_get(ball, ['strikerShortName']),
-            safe_get(ball, ['strikerRunsScored'], 0),
-            safe_get(ball, ['strikerBallsFaced'], 0),
-            safe_get(ball, ['nonStrikerParticipantId']),
-            safe_get(ball, ['nonStrikerShortName']),
-            safe_get(ball, ['nonStrikerRunsScored'], 0),
-            safe_get(ball, ['nonStrikerBallsFaced'], 0),
-            safe_get(ball, ['bowlerParticipantId']),
-            safe_get(ball, ['bowlerShortName']),
-            safe_get(ball, ['overNumber'], 0),
-            safe_get(ball, ['ballDisplayNumber'], 0),
-            safe_get(ball, ['ballTime']),
-            safe_get(ball, ['runsBat'], 0),
-            safe_get(ball, ['wides'], 0),
-            safe_get(ball, ['noBalls'], 0),
-            safe_get(ball, ['legByes'], 0),
-            safe_get(ball, ['byes'], 0),
-            safe_get(ball, ['penaltyRuns'], 0),
-            safe_get(ball, ['shortDescription']),
-            safe_get(ball, ['description'])
-        ))
-        logging.info(f"Inserted new ball with ID {ball_id} at {safe_get(ball, ['ballTime'])}")
+        conn.commit()
+        return cursor, conn
     except Exception as e:
-        logging.error(f"Error inserting ball ID {ball_id}: {e}")
+        logging.error(f"Error creating database: {e}")
+        raise
 
-
-def update_related_tables(cursor, ball, match_id):
-    pass
-
-
-def fetch_and_store_ball_data(conn, match_id):
-    """Fetch the latest ball data for the match and store new balls into the database."""
-    cursor = conn.cursor()
-
-    # 1) Fetch teams data (only once per match).
-    #    We may also store or update 'teams' table from the JSON.
-    teams_url = f"https://grassrootsapiproxy.cricket.com.au/scores/matches/{match_id}?jsconfig=eccn%3Atrue"
-    teams_data = call_api(teams_url)
-
-    if teams_data:
-        # Insert or update teams in the 'teams' table
-        for team in safe_get(teams_data, ['teams'], []):
-            team_id = safe_get(team, ['id'])
-            display_name = safe_get(team, ['displayName'])
-            result_type_id = safe_get(team, ['resultTypeId'])
-            result_type = safe_get(team, ['resultType'])
-            won_toss = safe_get(team, ['wonToss'], False)
-            batted_first = safe_get(team, ['battedFirst'], False)
-            is_home = safe_get(team, ['isHome'], False)
-            score_text = safe_get(team, ['scoreText'])
-            is_winner = safe_get(team, ['isWinner'], False)
-
-            cursor.execute('''
-                            INSERT OR IGNORE INTO teams (
-                                id, match_id, display_name, 
-                                result_type_id, result_type, won_toss, batted_first, 
-                                is_home, score_text, is_winner
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                team_id,
-                match_id,
-                display_name,
-                result_type_id,
-                result_type,
-                won_toss,
-                batted_first,
-                is_home,
-                score_text,
-                is_winner
-            ))
-
-    # 2) Fetch the ball-by-ball data
-    balls_url = f"https://grassrootsapiproxy.cricket.com.au/scores/matches/{match_id}/balls?jsconfig=eccn%3Atrue"
-    data = call_api(balls_url)
-
-    if not data:
-        logging.warning(f"No data returned for match ID {match_id}")
-        return
-
-    fetched_time = datetime.utcnow()
-    insert_match(cursor, teams_data, "N/A")
-    innings_list = safe_get(data, ['innings'], [])
-    for innings in innings_list:
-        innings_id = safe_get(innings, ['id'])
-        name = safe_get(innings, ['name'])
-        innings_close_type = safe_get(innings, ['inningsCloseType'])
-        innings_number = safe_get(innings, ['inningsNumber'])
-        innings_order = safe_get(innings, ['inningsOrder'])
-        batting_team_id = safe_get(innings, ['battingTeamId'])
-        is_declared = safe_get(innings, ['isDeclared'], False)
-        is_follow_on = safe_get(innings, ['isFollowOn'], False)
-        byes_runs = safe_get(innings, ['byesRuns'], 0)
-        leg_byes_runs = safe_get(innings, ['legByesRuns'], 0)
-        no_balls = safe_get(innings, ['noBalls'], 0)
-        wide_balls = safe_get(innings, ['wideBalls'], 0)
-        penalties = safe_get(innings, ['penalties'], 0)
-        total_extras = safe_get(innings, ['totalExtras'], 0)
-        overs_bowled = safe_get(innings, ['oversBowled'], 0.0)
-        runs_scored = safe_get(innings, ['runsScored'], 0)
-        number_of_wickets_fallen = safe_get(innings, ['numberOfWicketsFallen'], 0)
-
-        cursor.execute('''
-            INSERT OR IGNORE INTO innings (
-                id, match_id, name, innings_close_type, innings_number, innings_order,
-                batting_team_id, is_declared, is_follow_on, byes_runs, leg_byes_runs,
-                no_balls, wide_balls, penalties, total_extras, overs_bowled, runs_scored, 
-                number_of_wickets_fallen
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            innings_id,
-            match_id,
-            name,
-            innings_close_type,
-            innings_number,
-            innings_order,
-            batting_team_id,
-            is_declared,
-            is_follow_on,
-            byes_runs,
-            leg_byes_runs,
-            no_balls,
-            wide_balls,
-            penalties,
-            total_extras,
-            overs_bowled,
-            runs_scored,
-            number_of_wickets_fallen
-        ))
-
-        # Insert balls
-        for ball in safe_get(innings, ['balls'], []):
-            insert_ball_by_ball(cursor, ball, innings_id, fetched_time)
-
-            update_related_tables(cursor, ball, match_id)
-
-    conn.commit()
-    logging.info(f"Fetched and stored latest data for match ID {match_id}")
 
 def insert_match(cursor, match_data, season):
     try:
@@ -540,6 +373,486 @@ def insert_match(cursor, match_data, season):
         logging.error(f"Error inserting match data for match ID {match_data.get('id')}: {e}")
         return False
 
+
+def insert_round(cursor, round_data):
+    try:
+        round_id = safe_get(round_data, ['id'])
+        name = safe_get(round_data, ['name'])
+        short_name = safe_get(round_data, ['shortName'])
+
+        cursor.execute('''
+            INSERT OR IGNORE INTO rounds (id, name, short_name)
+            VALUES (?, ?, ?)
+        ''', (
+            round_id,
+            name,
+            short_name
+        ))
+    except Exception as e:
+        logging.error(f"Error inserting round data: {e}")
+
+
+def insert_grade(cursor, grade_data):
+    try:
+        grade_id = safe_get(grade_data, ['id'])
+        name = safe_get(grade_data, ['name'])
+
+        cursor.execute('''
+            INSERT OR IGNORE INTO grades (id, name)
+            VALUES (?, ?)
+        ''', (
+            grade_id,
+            name
+        ))
+    except Exception as e:
+        logging.error(f"Error inserting grade data: {e}")
+
+
+def insert_venue(cursor, venue_data):
+    try:
+        venue_id = safe_get(venue_data, ['id'])
+        if venue_id:
+            name = safe_get(venue_data, ['name'])
+            line1 = safe_get(venue_data, ['line1'])
+            suburb = safe_get(venue_data, ['suburb'])
+            post_code = safe_get(venue_data, ['postCode'])
+            state_name = safe_get(venue_data, ['stateName'])
+            country = safe_get(venue_data, ['country'])
+            playing_surface_id = safe_get(venue_data, ['playingSurface', 'id'])
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO venues (
+                    id, name, line1, suburb, post_code, state_name, country, playing_surface_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                venue_id,
+                name,
+                line1,
+                suburb,
+                post_code,
+                state_name,
+                country,
+                playing_surface_id
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting venue data for venue ID {venue_data.get('id')}: {e}")
+
+
+def insert_playing_surface(cursor, surface_data):
+    try:
+        surface_id = safe_get(surface_data, ['id'])
+        if surface_id:
+            name = safe_get(surface_data, ['name'])
+            latitude = safe_get(surface_data, ['latitude'])
+            longitude = safe_get(surface_data, ['longitude'])
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO playing_surfaces (
+                    id, name, latitude, longitude
+                ) VALUES (?, ?, ?, ?)
+            ''', (
+                surface_id,
+                name,
+                latitude,
+                longitude
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting playing surface data for surface ID {surface_data.get('id')}: {e}")
+
+
+def insert_teams(cursor, match_id, teams_data):
+    try:
+        for team in teams_data:
+            team_id = safe_get(team, ['id'])
+            display_name = safe_get(team, ['displayName'])
+            result_type_id = safe_get(team, ['resultTypeId'])
+            result_type = safe_get(team, ['resultType'])
+            won_toss = safe_get(team, ['wonToss'], False)
+            batted_first = safe_get(team, ['battedFirst'], False)
+            is_home = safe_get(team, ['isHome'], False)
+            score_text = safe_get(team, ['scoreText'])
+            is_winner = safe_get(team, ['isWinner'], False)
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO teams (
+                    id, match_id, display_name, 
+                    result_type_id, result_type, won_toss, batted_first, 
+                    is_home, score_text, is_winner
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                team_id,
+                match_id,
+                display_name,
+                result_type_id,
+                result_type,
+                won_toss,
+                batted_first,
+                is_home,
+                score_text,
+                is_winner
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting teams for match ID {match_id}: {e}")
+
+
+def insert_organisations(cursor, organisation_data):
+    try:
+        org_id = safe_get(organisation_data, ['id'])
+        if org_id:
+            name = safe_get(organisation_data, ['name'])
+            short_name = safe_get(organisation_data, ['shortName'])
+            logo_url = safe_get(organisation_data, ['logoUrl'])
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO organisations (id, name, short_name, logo_url)
+                VALUES (?, ?, ?, ?)
+            ''', (
+                org_id,
+                name,
+                short_name,
+                logo_url
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting organisation data for organisation ID {organisation_data.get('id')}: {e}")
+
+
+def insert_players(cursor, team_id, players_data):
+    try:
+        for player in players_data:
+            player_id = safe_get(player, ['participantId'])
+            name = safe_get(player, ['name'])
+            short_name = safe_get(player, ['shortName'])
+            roles = safe_get(player, ['roles'], [])
+            role = "--".join(roles) if roles else None
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO players (id, team_id, name, short_name, role)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                player_id,
+                team_id,
+                name,
+                short_name,
+                role,
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting players for team ID {team_id}: {e}")
+
+
+def insert_innings(cursor, match_id, innings_data):
+    try:
+        for innings in innings_data:
+            innings_id = safe_get(innings, ['id'])
+            name = safe_get(innings, ['name'])
+            innings_close_type = safe_get(innings, ['inningsCloseType'])
+            innings_number = safe_get(innings, ['inningsNumber'])
+            innings_order = safe_get(innings, ['inningsOrder'])
+            batting_team_id = safe_get(innings, ['battingTeamId'])
+            is_declared = safe_get(innings, ['isDeclared'], False)
+            is_follow_on = safe_get(innings, ['isFollowOn'], False)
+            byes_runs = safe_get(innings, ['byesRuns'], 0)
+            leg_byes_runs = safe_get(innings, ['legByesRuns'], 0)
+            no_balls = safe_get(innings, ['noBalls'], 0)
+            wide_balls = safe_get(innings, ['wideBalls'], 0)
+            penalties = safe_get(innings, ['penalties'], 0)
+            total_extras = safe_get(innings, ['totalExtras'], 0)
+            overs_bowled = safe_get(innings, ['oversBowled'], 0.0)
+            runs_scored = safe_get(innings, ['runsScored'], 0)
+            number_of_wickets_fallen = safe_get(innings, ['numberOfWicketsFallen'], 0)
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO innings (
+                    id, match_id, name, innings_close_type, innings_number, innings_order,
+                    batting_team_id, is_declared, is_follow_on, byes_runs, leg_byes_runs,
+                    no_balls, wide_balls, penalties, total_extras, overs_bowled, runs_scored, 
+                    number_of_wickets_fallen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                innings_id,
+                match_id,
+                name,
+                innings_close_type,
+                innings_number,
+                innings_order,
+                batting_team_id,
+                is_declared,
+                is_follow_on,
+                byes_runs,
+                leg_byes_runs,
+                no_balls,
+                wide_balls,
+                penalties,
+                total_extras,
+                overs_bowled,
+                runs_scored,
+                number_of_wickets_fallen
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting innings data for match ID {match_id}: {e}")
+
+
+def insert_batting_stats(cursor, innings_id, batting_data):
+    try:
+        for batting in batting_data:
+            participant_id = safe_get(batting, ['participantId'])
+            if not participant_id:
+                continue  # Skip if participant ID is missing
+
+            bat_order = safe_get(batting, ['batOrder'])
+            bat_instance = safe_get(batting, ['batInstance'])
+            balls_faced = safe_get(batting, ['ballsFaced'], 0)
+            fours_scored = safe_get(batting, ['foursScored'], 0)
+            sixes_scored = safe_get(batting, ['sixesScored'], 0)
+            runs_scored = safe_get(batting, ['runsScored'], 0)
+            batting_minutes = safe_get(batting, ['battingMinutes'], 0)
+            strike_rate = safe_get(batting, ['strikeRate'], 0.0)
+            dismissal_type_id = safe_get(batting, ['dismissalTypeId'])
+            dismissal_type = safe_get(batting, ['dismissalType'])
+            dismissal_text = safe_get(batting, ['dismissalText'])
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO batting_stats (
+                    id, innings_id, player_id, bat_order, bat_instance, balls_faced,
+                    fours_scored, sixes_scored, runs_scored, batting_minutes, 
+                    strike_rate, dismissal_type_id, dismissal_type, dismissal_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                f"{innings_id}-{participant_id}",  # Unique ID
+                innings_id,
+                participant_id,
+                bat_order,
+                bat_instance,
+                balls_faced,
+                fours_scored,
+                sixes_scored,
+                runs_scored,
+                batting_minutes,
+                strike_rate,
+                dismissal_type_id,
+                dismissal_type,
+                dismissal_text
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting batting stats for innings ID {innings_id}: {e}")
+
+
+def insert_bowling_stats(cursor, innings_id, bowling_data):
+    try:
+        for bowling in bowling_data:
+            participant_id = safe_get(bowling, ['participantId'])
+            if not participant_id:
+                continue  # Skip if participant ID is missing
+
+            bowl_order = safe_get(bowling, ['bowlOrder'])
+            overs_bowled = safe_get(bowling, ['oversBowled'], 0.0)
+            maidens_bowled = safe_get(bowling, ['maidensBowled'], 0)
+            runs_conceded = safe_get(bowling, ['runsConceded'], 0)
+            wickets_taken = safe_get(bowling, ['wicketsTaken'], 0)
+            wide_balls = safe_get(bowling, ['wideBalls'], 0)
+            no_balls = safe_get(bowling, ['noBalls'], 0)
+            economy = safe_get(bowling, ['economy'], 0.0)
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO bowling_stats (
+                    id, innings_id, player_id, bowl_order, overs_bowled, maidens_bowled,
+                    runs_conceded, wickets_taken, wide_balls, no_balls, economy
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                f"{innings_id}-{participant_id}",  # Unique ID
+                innings_id,
+                participant_id,
+                bowl_order,
+                overs_bowled,
+                maidens_bowled,
+                runs_conceded,
+                wickets_taken,
+                wide_balls,
+                no_balls,
+                economy
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting bowling stats for innings ID {innings_id}: {e}")
+
+
+def insert_fielding_stats(cursor, innings_id, fielding_data):
+    try:
+        for fielding in fielding_data:
+            participant_id = safe_get(fielding, ['participantId'])
+            if not participant_id:
+                continue  # Skip if participant ID is missing
+
+            catches = safe_get(fielding, ['catches'], 0)
+            wicket_keeper_catches = safe_get(fielding, ['wicketKeeperCatches'], 0)
+            total_catches = safe_get(fielding, ['totalCatches'], 0)
+            unassisted_run_outs = safe_get(fielding, ['unassistedRunOuts'], 0)
+            assisted_run_outs = safe_get(fielding, ['assistedRunOuts'], 0)
+            run_outs = safe_get(fielding, ['runOuts'], 0)
+            stumpings = safe_get(fielding, ['stumpings'], 0)
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO fielding_stats (
+                    id, innings_id, player_id, catches, wicket_keeper_catches, 
+                    total_catches, unassisted_run_outs, assisted_run_outs, 
+                    run_outs, stumpings
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                f"{innings_id}-{participant_id}",  # Unique ID
+                innings_id,
+                participant_id,
+                catches,
+                wicket_keeper_catches,
+                total_catches,
+                unassisted_run_outs,
+                assisted_run_outs,
+                run_outs,
+                stumpings
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting fielding stats for innings ID {innings_id}: {e}")
+
+db_path = r'aw_shield.db'
+new_conn = sqlite3.connect(db_path)
+def insert_fall_of_wickets(cursor, innings_id, fall_of_wickets_data):
+    try:
+        for fall in fall_of_wickets_data:
+            participant_id = safe_get(fall, ['participantId'])
+            if not participant_id:
+                continue  # Skip if participant ID is missing
+
+            order = safe_get(fall, ['order'], 0)
+            runs = safe_get(fall, ['runs'], 0)
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO fall_of_wickets (
+                    id, innings_id, player_id, "order", runs
+                ) VALUES (?, ?, ?, ?, ?)
+            ''', (
+                f"{innings_id}-{participant_id}",  # Unique ID
+                innings_id,
+                participant_id,
+                order,
+                runs
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting fall of wickets for innings ID {innings_id}: {e}")
+
+
+def insert_match_schedule(cursor, match_id, schedule_data):
+    try:
+        for schedule in schedule_data:
+            schedule_id = safe_get(schedule, ['id'])
+            match_day = safe_get(schedule, ['matchDay'])
+            start_datetime = safe_get(schedule, ['startDateTime'])
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO match_schedule (
+                    id, match_id, match_day, start_datetime
+                ) VALUES (?, ?, ?, ?)
+            ''', (
+                f"{match_id}-{match_day}",  # Unique ID
+                match_id,
+                match_day,
+                start_datetime
+            ))
+    except Exception as e:
+        logging.error(f"Error inserting match schedule for match ID {match_id}: {e}")
+
+
+def insert_ball_by_ball(cursor, ball, innings_id, fetched_time,innings_data):
+    try:
+        ball_id = safe_get(ball, ['id'])
+        if not ball_id:
+            logging.warning("Ball without ID encountered. Skipping insertion.")
+            return
+
+        # Check if the ball already exists
+        cursor.execute("SELECT id FROM ball_by_ball WHERE id = ?", (ball_id,))
+        if cursor.fetchone():
+            logging.info(f"Ball ID {ball_id} already exists. Skipping insertion.")
+            return
+
+        # Insert the ball
+        cursor.execute('''
+                            INSERT INTO ball_by_ball (
+                                id, innings_id, innings_number, innings_order, innings_name,
+                                batting_team_id, progress_runs, progress_wickets, progress_score,
+                                striker_participant_id, striker_short_name, striker_runs_scored, striker_balls_faced,
+                                non_striker_participant_id, non_striker_short_name, non_striker_runs_scored, non_striker_balls_faced,
+                                bowler_participant_id, bowler_short_name, over_number, ball_display_number, ball_time,
+                                runs_bat, wides, no_balls, leg_byes, byes, penalty_runs, short_description, description
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+            safe_get(ball, ['id']),
+            safe_get(innings_data, ['id']),
+            safe_get(innings_data, ['inningsNumber']),
+            safe_get(innings_data, ['inningsOrder']),
+            safe_get(innings_data, ['inningsName']),
+            safe_get(innings_data, ['battingTeamId']),
+            safe_get(ball, ['progressRuns'], 0),
+            safe_get(ball, ['progressWickets'], 0),
+            safe_get(ball, ['progressScore']),
+            safe_get(ball, ['strikerParticipantId']),
+            safe_get(ball, ['strikerShortName']),
+            safe_get(ball, ['strikerRunsScored'], 0),
+            safe_get(ball, ['strikerBallsFaced'], 0),
+            safe_get(ball, ['nonStrikerParticipantId']),
+            safe_get(ball, ['nonStrikerShortName']),
+            safe_get(ball, ['nonStrikerRunsScored'], 0),
+            safe_get(ball, ['nonStrikerBallsFaced'], 0),
+            safe_get(ball, ['bowlerParticipantId']),
+            safe_get(ball, ['bowlerShortName']),
+            safe_get(ball, ['overNumber'], 0),
+            safe_get(ball, ['ballDisplayNumber'], 0),
+            safe_get(ball, ['ballTime']),
+            safe_get(ball, ['runsBat'], 0),
+            safe_get(ball, ['wides'], 0),
+            safe_get(ball, ['noBalls'], 0),
+            safe_get(ball, ['legByes'], 0),
+            safe_get(ball, ['byes'], 0),
+            safe_get(ball, ['penaltyRuns'], 0),
+            safe_get(ball, ['shortDescription']),
+            safe_get(ball, ['description'])
+        ))
+        logging.info(f"Inserted new ball with ID {ball_id} at {safe_get(ball, ['ballTime'])}")
+    except Exception as e:
+        logging.error(f"Error inserting ball ID {ball_id}: {e}")
+
+def do_insertion(cursor, conn, match_json, match_id, season):
+    try:
+        # Remove ball-by-ball insertion from here
+        insert_round(cursor, safe_get(match_json, ['round']))
+        insert_grade(cursor, safe_get(match_json, ['grade']))
+        insert_playing_surface(cursor, safe_get(match_json, ['venue', 'playingSurface'], {}))
+        insert_venue(cursor, safe_get(match_json, ['venue'], {}))
+        insert_match(cursor, match_json, season)  # No longer need to check is_ball_by_ball here
+
+        insert_teams(cursor, match_id, safe_get(match_json, ['matchSummary', 'teams'], []))
+
+        # Insert organisations
+        organisations = safe_get(match_json, ['teams'], [])
+        for team_org in organisations:
+            insert_organisations(cursor, safe_get(team_org, ['owningOrganisation'], {}))
+
+        # Insert players
+        teams = safe_get(match_json, ['teams'], [])
+        for team in teams:
+            team_id = safe_get(team, ['id'])
+            players = safe_get(team, ['players'], [])
+            insert_players(cursor, team_id, players)
+
+        # Insert innings structure without stats
+        innings_list = safe_get(match_json, ['innings'], [])
+        insert_innings(cursor, match_id, innings_list)
+
+        # Insert match schedule
+        insert_match_schedule(cursor, match_id, safe_get(match_json, ['matchSchedule'], []))
+
+        conn.commit()
+    except Exception as e:
+        logging.error(f"Error during insertion for match ID {match_id}: {e}")
+        conn.rollback()
+        raise
+
 def clear_database(conn):
     """Clear all data from the database tables."""
     cursor = conn.cursor()
@@ -562,22 +875,245 @@ def clear_database(conn):
         logging.error(f"Error clearing database: {e}")
 
 
-# --- Async Functions ---
+def fill_a_first_db(match_id, season_name, conn,match_json,cursor):
+    do_insertion(cursor, conn, match_json, match_id, season_name)
 
+
+def calculate_bowling_partnerships(conn, bowler_map):
+
+    query = """
+        SELECT
+            innings_id,
+            over_number,
+            bowler_participant_id,
+            bowler_short_name,
+            progress_wickets,
+            runs_bat,
+            wides,
+            no_balls,
+            ball_display_number
+        FROM ball_by_ball
+        ORDER BY innings_id, over_number, ball_display_number
+    """
+    df = pd.read_sql_query(query, conn)
+
+    if df.empty:
+        logging.warning("No bowling data found in 'ball_by_ball' table.")
+        return pd.DataFrame(columns=['Bowler 1', 'Bowler 2', 'Wickets', 'Dot Ball %', 'Economy Rate'])
+
+    # Compute 'runs_conceded'
+    df['runs_conceded'] = df['runs_bat'] + df['wides'] + df['no_balls']
+
+    # Compute 'wickets_taken' as the difference in 'progress_wickets' within the same innings
+    df['wickets_taken'] = df.groupby('innings_id')['progress_wickets'].diff().fillna(df['progress_wickets']).astype(int)
+    df['wickets_taken'] = df['wickets_taken'].apply(lambda x: x if x >= 0 else 0)
+
+    # Shift the bowler to get the next bowler within the same innings
+    df['next_bowler_id'] = df.groupby('innings_id')['bowler_participant_id'].shift(-1)
+    df['next_bowler_name'] = df.groupby('innings_id')['bowler_short_name'].shift(-1)
+
+    # Exclude rows where bowler IDs or names are None
+    partnerships = df.dropna(subset=['bowler_participant_id', 'next_bowler_id', 'bowler_short_name', 'next_bowler_name'])
+
+    # Further exclude rows where the next bowler is the same as the current bowler
+    partnerships = partnerships[partnerships['bowler_participant_id'] != partnerships['next_bowler_id']]
+
+    # Now, group by bowler pairs
+    partnerships['bowler_pair'] = partnerships.apply(
+        lambda row: tuple(sorted([row['bowler_participant_id'], row['next_bowler_id']])), axis=1
+    )
+
+    # Aggregate partnership statistics
+    partnership_stats = partnerships.groupby('bowler_pair').agg(
+        Wickets=('wickets_taken', 'sum'),
+        Dot_Balls=('runs_conceded', lambda x: (x == 0).sum()),
+        Total_Balls=('runs_conceded', 'count'),
+        Runs_Conceded=('runs_conceded', 'sum')
+    ).reset_index()
+
+    # Calculate Dot Ball Percentage and Economy Rate
+    partnership_stats['Dot_Ball_%'] = (partnership_stats['Dot_Balls'] / partnership_stats['Total_Balls']) * 100
+    partnership_stats['Economy_Rate'] = (partnership_stats['Runs_Conceded'] / partnership_stats['Total_Balls']) * 6  # Per over
+
+    # Map bowler IDs to names using bowler_map
+    partnership_stats['Bowler 1'] = partnership_stats['bowler_pair'].apply(lambda x: bowler_map.get(x[0], f"Bowler {x[0]}"))
+    partnership_stats['Bowler 2'] = partnership_stats['bowler_pair'].apply(lambda x: bowler_map.get(x[1], f"Bowler {x[1]}"))
+
+    # Select and reorder columns
+    final_df = partnership_stats[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']]
+
+    return final_df
+
+
+def identify_best_worst_partnerships(partnerships_df, top_n=20):
+
+    if partnerships_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Normalize the metrics with safeguards against division by zero
+    partnerships_df['Wickets_norm'] = partnerships_df['Wickets'].apply(
+        lambda x: (x - partnerships_df['Wickets'].min()) / (partnerships_df['Wickets'].max() - partnerships_df['Wickets'].min())
+        if partnerships_df['Wickets'].max() != partnerships_df['Wickets'].min() else 0
+    )
+    partnerships_df['Dot_Ball_%_norm'] = partnerships_df['Dot_Ball_%'].apply(
+        lambda x: (x - partnerships_df['Dot_Ball_%'].min()) / (partnerships_df['Dot_Ball_%'].max() - partnerships_df['Dot_Ball_%'].min())
+        if partnerships_df['Dot_Ball_%'].max() != partnerships_df['Dot_Ball_%'].min() else 0
+    )
+    partnerships_df['Economy_Rate_norm'] = partnerships_df['Economy_Rate'].apply(
+        lambda x: 1 - (x - partnerships_df['Economy_Rate'].min()) / (partnerships_df['Economy_Rate'].max() - partnerships_df['Economy_Rate'].min())
+        if partnerships_df['Economy_Rate'].max() != partnerships_df['Economy_Rate'].min() else 0
+    )
+
+    # Compute a composite score
+    partnerships_df['Composite_Score'] = partnerships_df[['Wickets_norm', 'Dot_Ball_%_norm', 'Economy_Rate_norm']].mean(axis=1)
+
+    # Best partnerships
+    best_partnerships = partnerships_df.nlargest(top_n, 'Composite_Score')
+
+    # Worst partnerships
+    worst_partnerships = partnerships_df.nsmallest(top_n, 'Composite_Score')
+
+    return best_partnerships, worst_partnerships
+
+
+def visualize_bowling_partnerships(best_df, worst_df):
+    """
+    Visualize the best and worst bowling partnerships.
+    """
+    st.subheader("Bowling Partnerships")
+
+    if best_df.empty and worst_df.empty:
+        st.info("No bowling partnerships data available.")
+        return
+
+    # Display Best Partnerships
+    if not best_df.empty:
+        st.markdown("### Best Partnerships")
+        st.dataframe(best_df[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']])
+
+        # Plot Best Partnerships
+
+
+    # Display Worst Partnerships
+    if not worst_df.empty:
+        st.markdown("### Worst Partnerships")
+        st.dataframe(worst_df[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']])
+
+        # Plot Worst Partnerships
+
+
+
+def get_bowler_map(conn):
+    """
+    Returns a dictionary mapping {bowler_participant_id: bowler_short_name} for all bowlers in the match.
+    """
+    query = """
+        SELECT DISTINCT bowler_participant_id, bowler_short_name
+        FROM ball_by_ball
+    """
+    df = pd.read_sql_query(query, conn)
+
+    if df.empty:
+        logging.warning("No bowler data found in 'ball_by_ball' table.")
+        return {}
+
+    bowler_map = {row['bowler_participant_id']: row['bowler_short_name'] for _, row in df.iterrows()}
+    return bowler_map
+
+def fetch_and_store_ball_data(conn, match_id):
+    cursor = conn.cursor()
+    try:
+        # Fetch latest ball-by-ball data
+        balls_url = f"https://grassrootsapiproxy.cricket.com.au/scores/matches/{match_id}/balls?jsconfig=eccn%3Atrue"
+        data = call_api(balls_url)
+
+        if not data:
+            logging.warning(f"No ball data returned for match ID {match_id}")
+            return
+        do_insertion(cursor, conn, data, match_id, "N/A")
+        # Process innings and balls
+        for innings in safe_get(data, ['innings'], []):
+            innings_id = safe_get(innings, ['id'])
+
+            # Update innings metadata if needed
+            cursor.execute('''
+                UPDATE innings SET
+                    name = ?,
+                    innings_close_type = ?,
+                    batting_team_id = ?,
+                    runs_scored = ?,
+                    number_of_wickets_fallen = ?
+                WHERE id = ?
+            ''', (
+                safe_get(innings, ['name']),
+                safe_get(innings, ['inningsCloseType']),
+                safe_get(innings, ['battingTeamId']),
+                safe_get(innings, ['runsScored'], 0),
+                safe_get(innings, ['numberOfWicketsFallen'], 0),
+                innings_id
+            ))
+
+            # Insert/update batting, bowling, and fielding stats
+            insert_batting_stats(cursor, innings_id, safe_get(innings, ['batting'], []))
+            insert_bowling_stats(cursor, innings_id, safe_get(innings, ['bowling'], []))
+            insert_fielding_stats(cursor, innings_id, safe_get(innings, ['fielding'], []))
+            insert_fall_of_wickets(cursor, innings_id, safe_get(innings, ['fallOfWickets'], []))
+
+            # Process individual balls
+            for ball in safe_get(innings, ['balls'], []):
+                insert_ball_by_ball(cursor, ball, innings_id, datetime.utcnow(),innings)
+
+        conn.commit()
+        logging.info(f"Ball-by-ball data updated for match ID {match_id}")
+
+    except Exception as e:
+        logging.error(f"Error in ball-by-ball update: {e}")
+        conn.rollback()
+
+def fetch_initial_data(match_id, conn, season="N/A"):
+    """Fetch and store all non-ball data using existing insertion functions"""
+    try:
+        cursor = conn.cursor()
+
+        # Fetch main match data
+        match_url = f"https://grassrootsapiproxy.cricket.com.au/scores/matches/{match_id}?jsconfig=eccn%3Atrue"
+        match_data = call_api(match_url)
+
+        # Fetch additional required data
+        teams_data = safe_get(match_data, ['matchSummary', 'teams'], [])
+        schedule_data = safe_get(match_data, ['matchSchedule'], [])
+        # Combine data into match_json structure expected by do_insertion
+        combined_data = {
+            **match_data,
+            "teams": teams_data,  # Directly use the teams list
+            "matchSchedule": schedule_data,  # Directly use the schedule list
+            "innings": []
+        }
+
+        # Perform all database insertions
+        do_insertion(cursor, conn, combined_data, match_id, season)
+
+        logging.info(f"Initial data loaded for match ID {match_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to load initial data: {e}")
+        conn.rollback()
+        return False
 async def async_live_data_fetcher(conn, match_id, stop_event):
-    """Asynchronous function to fetch/store data every 5 seconds."""
     while not stop_event.is_set():
-        fetch_and_store_ball_data(conn, match_id)
-        await asyncio.sleep(5)
+        try:
+            fetch_and_store_ball_data(conn, match_id)
+            await asyncio.sleep(5)
+        except Exception as e:
+            logging.error(f"Async ball data fetch error: {str(e)}")
+            await asyncio.sleep(5)  # Prevent tight loop on errors
 
 
 def run_async_loop(loop):
     """Run the asyncio event loop in a background thread."""
     asyncio.set_event_loop(loop)
     loop.run_forever()
-
-
-# --- Streamlit App ---
+st.set_page_config(layout="wide", page_title="Decidr - The Decisions Maker", page_icon="🏏")
 
 st.title("Live Match Data Viewer")
 
@@ -599,10 +1135,6 @@ if 'stop_event' not in st.session_state:
 
 if 'live_task' not in st.session_state:
     st.session_state.live_task = None
-
-
-# Database connection
-@st.cache_resource
 def get_db_connection():
     db_path = 'try.db'
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -610,7 +1142,7 @@ def get_db_connection():
 
 
 conn = get_db_connection()
-create_tables(conn)
+create_db()
 
 # User input
 match_url = st.text_input("Enter match URL:", "")
@@ -619,402 +1151,507 @@ stop_button = st.button("Stop")
 
 match_id = extract_match_id(match_url) if match_url else None
 
-# Start live data
 if start_button:
     if not match_id:
         st.error("Invalid match URL.")
     elif st.session_state.live_task and not st.session_state.live_task.done():
         st.warning("Live data collection is already running.")
     else:
-        if st.session_state.live_task:
-            st.session_state.stop_event.set()
-            st.session_state.live_task = None
-            st.session_state.stop_event = threading.Event()
-        clear_database(conn)
-        coro = async_live_data_fetcher(conn, match_id, st.session_state.stop_event)
-        task = asyncio.run_coroutine_threadsafe(coro, st.session_state.async_loop)
-        st.session_state.live_task = task
-        st.success("Live data collection started and DB cleared.")
+        try:
+            # Clear existing data
+            clear_database(conn)
 
-# Stop live data
+            # Step 1: Fetch and store initial data
+            if fetch_initial_data(match_id, conn):
+                st.success("Initial match data loaded successfully!")
+            else:
+                raise Exception("Failed to fetch initial data")
+
+            # Step 2: Start async ball-by-ball updates
+            if st.session_state.live_task:
+                st.session_state.stop_event.set()
+                st.session_state.live_task = None
+                st.session_state.stop_event = threading.Event()
+
+            coro = async_live_data_fetcher(conn, match_id, st.session_state.stop_event)
+            task = asyncio.run_coroutine_threadsafe(coro, st.session_state.async_loop)
+            st.session_state.live_task = task
+            st.success("Live ball-by-ball tracking started!")
+
+        except Exception as e:
+            st.error(f"Initialization failed: {str(e)}")
+            logging.error(f"Initialization error: {str(e)}")
+
 if stop_button:
     if st.session_state.live_task and not st.session_state.live_task.done():
         st.session_state.stop_event.set()
         st.session_state.live_task = None
         st.success("Live data collection stopped.")
+
+        # Clear the try.db database
+        clear_database(conn)
+        st.info("Database has been cleared.")
     else:
         st.warning("No live data collection is running.")
 
-# -------------------------------
-#   LIVE DATA VISUALIZATIONS
-# -------------------------------
 
-# -------------------------------
-#   LIVE DATA VISUALIZATIONS
-# -------------------------------
+###############################################################################
+# KPI Visualization for Batting Phases
+###############################################################################
 
-st.header("Live Match Insights")
-
-if match_id:
-    # --- Real-time Cumulative Runs and Wickets Chart ---
-    st.subheader("Cumulative Runs and Wickets Over Time")
-    runs_wickets_query = """
-    SELECT 
-        innings_id,
-        innings_number,
-        ball_time, 
-        runs_bat,
-        CASE WHEN short_description LIKE '%OUT%' THEN 1 ELSE 0 END AS wicket
-    FROM ball_by_ball 
-    WHERE ball_time IS NOT NULL
-    ORDER BY innings_number, ball_time ASC
+def get_team_ids_and_names(conn):
     """
-    df_runs_wickets = pd.read_sql_query(runs_wickets_query, conn)
+    Returns a dictionary mapping {team_id: team_display_name} for all teams in the single match.
+    """
+    query = """
+        SELECT id, display_name
+        FROM teams
+    """
+    df = pd.read_sql_query(query, conn)
 
-    if not df_runs_wickets.empty:
-        df_runs_wickets['ball_time'] = pd.to_datetime(df_runs_wickets['ball_time'], utc=True)
-        df_runs_wickets = df_runs_wickets.sort_values(['innings_number', 'ball_time'])
-        df_runs_wickets['cumulative_runs'] = df_runs_wickets.groupby('innings_number')['runs_bat'].cumsum()
-        df_runs_wickets['cumulative_wickets'] = df_runs_wickets.groupby('innings_number')['wicket'].cumsum()
+    if df.empty:
+        logging.warning("No teams found in the 'teams' table.")
+        return {}
 
-        fig_cumulative = go.Figure()
+    team_map = {row['id']: row['display_name'] for _, row in df.iterrows()}
+    return team_map
 
-        # Add traces for each innings
-        for innings in df_runs_wickets['innings_id'].unique():
-            innings_data = df_runs_wickets[df_runs_wickets['innings_id'] == innings]
-            fig_cumulative.add_trace(go.Scatter(
-                x=innings_data['ball_time'],
-                y=innings_data['cumulative_runs'],
-                mode='lines+markers',
-                name=f'Runs - Innings {innings}',
-                yaxis='y1'
-            ))
-            fig_cumulative.add_trace(go.Scatter(
-                x=innings_data['ball_time'],
-                y=innings_data['cumulative_wickets'],
-                mode='lines+markers',
-                name=f'Wickets - Innings {innings}',
-                yaxis='y2'
-            ))
 
-        fig_cumulative.update_layout(
-            xaxis_title="Time",
-            yaxis_title="Cumulative Runs",
-            yaxis2=dict(title="Cumulative Wickets", overlaying='y', side='right'),
-            template="plotly_dark",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+def calculate_phase_metrics(conn, team_map):
+    """
+    Calculate the 5 KPIs directly from 'ball_by_ball' without referencing 'innings'.
+
+    Returns a DataFrame with columns: ['Team', 'Phase', 'Metric', 'Value'].
+    """
+    # 1. Base Query: Select necessary columns and categorize phases
+    base_query = """
+        SELECT
+            CASE
+                WHEN over_number BETWEEN 0 AND 10 THEN 'Powerplay'
+                WHEN over_number BETWEEN 11 AND 40 THEN 'Middle'
+                ELSE 'Death'
+            END AS phase,
+            batting_team_id,
+            over_number,
+            ball_display_number,
+            runs_bat,
+            wides,
+            no_balls
+        FROM ball_by_ball
+    """
+
+    df = pd.read_sql_query(base_query, conn)
+
+    if df.empty:
+        logging.warning("No ball-by-ball data found in 'ball_by_ball' table.")
+        return pd.DataFrame(columns=['Team', 'Phase', 'Metric', 'Value'])
+
+    # 2. Define KPI conditions
+    kpi_definitions = {
+        'Dot Balls': "(runs_bat = 0 AND wides = 0 AND no_balls = 0)",
+        'Singles': "(runs_bat = 1)",
+        'Boundaries': "(runs_bat IN (4,6))",
+        'Boundaries (First & Last Ball)': "(runs_bat IN (4,6) AND ball_display_number IN (1,6))",
+    }
+
+    results = []
+
+    # 3. Calculate each KPI
+    for metric_name, condition in kpi_definitions.items():
+        query = f"""
+            SELECT
+                phase,
+                batting_team_id,
+                COUNT(*) AS total_balls,
+                SUM(CASE WHEN {condition} THEN 1 ELSE 0 END) AS met_count
+            FROM (
+                {base_query}
+            )
+            GROUP BY phase, batting_team_id
+        """
+        metric_df = pd.read_sql_query(query, conn)
+
+        if metric_df.empty:
+            logging.info(f"No data for KPI: {metric_name}")
+            continue
+
+        for _, row in metric_df.iterrows():
+            team_id = row['batting_team_id']
+            team_name = team_map.get(team_id, f"Team {team_id}")
+            total_balls = row['total_balls']
+            met_count = row['met_count']
+            value_pct = (met_count / total_balls) * 100 if total_balls else 0
+
+            results.append({
+                'Team': team_name,
+                'Phase': row['phase'],
+                'Metric': metric_name,
+                'Value': round(value_pct, 2),
+            })
+
+    # 4. Calculate Strike Rate
+    sr_query = f"""
+        SELECT
+            phase,
+            batting_team_id,
+            SUM(runs_bat) AS total_runs,
+            COUNT(*) AS total_balls
+        FROM (
+            {base_query}
         )
-        st.plotly_chart(fig_cumulative, use_container_width=True)
-    else:
-        st.info("No data yet.")
-
-
-
-    # --- Wicket Fall Analysis ---
-    st.subheader("Wicket Fall Analysis")
-    wicket_fall_query = """
-    SELECT
-        innings_id,
-        over_number + (ball_display_number / 10.0) as over_ball,
-        progress_runs,
-        progress_wickets
-    FROM ball_by_ball
-    WHERE short_description LIKE '%OUT%'
-    ORDER BY innings_id, over_number, ball_display_number
+        GROUP BY phase, batting_team_id
     """
-    df_wicket_fall = pd.read_sql_query(wicket_fall_query, conn)
+    sr_df = pd.read_sql_query(sr_query, conn)
 
-    if not df_wicket_fall.empty:
-        fig_wicket_fall = go.Figure()
-        for innings in df_wicket_fall['innings_id'].unique():
-            innings_data = df_wicket_fall[df_wicket_fall['innings_id'] == innings]
-            fig_wicket_fall.add_trace(go.Scatter(
-                x=innings_data['over_ball'],
-                y=innings_data['progress_runs'],
-                mode='markers',
-                name=f'Innings {innings}',
-                text=innings_data['progress_wickets'].astype(str) + " Wickets",
+    for _, row in sr_df.iterrows():
+        team_id = row['batting_team_id']
+        team_name = team_map.get(team_id, f"Team {team_id}")
+        total_runs = row['total_runs']
+        total_balls = row['total_balls']
+        sr_value = (total_runs / total_balls) * 100 if total_balls else 0
+
+        results.append({
+            'Team': team_name,
+            'Phase': row['phase'],
+            'Metric': 'Strike Rate',
+            'Value': round(sr_value, 2),
+        })
+
+    # 5. Convert results to DataFrame
+    metrics_df = pd.DataFrame(results)
+
+    if metrics_df.empty:
+        logging.warning("No KPI data was calculated.")
+
+    return metrics_df
+
+
+import plotly.express as px
+import plotly.graph_objects as go
+def calculate_bowling_phase_metrics(conn, team_map):
+    """
+    Calculate bowling KPIs (Dot Balls, Singles, Boundaries, Boundaries (First & Last Ball),
+    Economy Rate) for each PHASE (Powerplay, Middle, Death).
+
+    Returns DataFrame with columns: ['Team','Phase','Metric','Value'].
+    """
+    # 1) Load ball_by_ball
+    base_query = """
+        SELECT
+            CASE
+                WHEN over_number BETWEEN 0 AND 10 THEN 'Powerplay'
+                WHEN over_number BETWEEN 11 AND 40 THEN 'Middle'
+                ELSE 'Death'
+            END AS phase,
+            batting_team_id,
+            over_number,
+            ball_display_number,
+            runs_bat,
+            wides,
+            no_balls
+        FROM ball_by_ball
+    """
+    df = pd.read_sql_query(base_query, conn)
+
+    if df.empty:
+        logging.warning("No ball-by-ball data found in 'ball_by_ball'.")
+        return pd.DataFrame(columns=['Team','Phase','Metric','Value'])
+
+    # 2) We assume EXACTLY two teams in the match, so if batting_team_id == T1, then bowling is T2
+    #    We build a quick "opposite" function:
+    team_ids = list(team_map.keys())  # e.g. ["TeamA_ID", "TeamB_ID"]
+    if len(team_ids) != 2:
+        logging.warning(f"Expected 2 teams total, found {len(team_ids)}: {team_ids}")
+
+    def get_opposite_team_id(batting_id):
+        """Return the other team ID among the two."""
+        return team_ids[1] if batting_id == team_ids[0] else team_ids[0]
+
+    # Add a new column "bowling_team_id"
+    df['bowling_team_id'] = df['batting_team_id'].apply(get_opposite_team_id)
+
+    # Also define how many runs were conceded on each ball:
+    # runs_conceded = runs_bat + wides + no_balls
+    df['runs_conceded'] = df['runs_bat'] + df['wides'] + df['no_balls']
+
+    # 3) We define KPI conditions from the "bowling" perspective:
+    # Dot Balls, Singles, Boundaries, Boundaries(First&LastBall), plus Economy Rate
+    #   - Dot ball for bowling if runs_bat=0, no wides/noBalls
+    #   - Single for bowling if runs_bat=1
+    #   - Boundaries for runs_bat in (4,6)
+    #   - Boundaries (First & Last) for runs_bat in (4,6) AND ball_display_number in (1,6)
+    #   - Economy Rate = sum(runs_conceded) / total_deliveries * 100 (per 100 balls)
+
+    # We group by (phase, bowling_team_id)
+    group_cols = ['phase','bowling_team_id']
+    grouped = df.groupby(group_cols, dropna=True)
+
+    # Count total deliveries
+    total_balls = grouped.size()  # Series: (phase, bowlerTeamID) -> count
+    # Dot balls:
+    dot_condition = (df['runs_bat'] == 0) & (df['wides'] == 0) & (df['no_balls'] == 0)
+    dot_balls = grouped.apply(lambda g: g[dot_condition].shape[0])
+    # Singles:
+    singles_condition = (df['runs_bat'] == 1)
+    singles = grouped.apply(lambda g: g[singles_condition].shape[0])
+    # Boundaries:
+    boundary_condition = df['runs_bat'].isin([4,6])
+    boundaries = grouped.apply(lambda g: g[boundary_condition].shape[0])
+    # Boundaries (First & Last Ball):
+    boundary_first_last_condition = boundary_condition & df['ball_display_number'].isin([1,6])
+    boundaries_fl = grouped.apply(lambda g: g[boundary_first_last_condition].shape[0])
+    # Sum of runs conceded:
+    total_runs_conceded = grouped['runs_conceded'].sum()
+
+    results = []
+
+    # 4) For each group, compute metrics
+    for idx in total_balls.index:
+        ph, bowl_team_id = idx
+        bowl_team_name = team_map.get(bowl_team_id, f"Team {bowl_team_id}")
+
+        t_balls = total_balls[idx]
+        if t_balls == 0:
+            continue
+
+        # Dot Ball %
+        dot_count = dot_balls.get(idx, 0)
+        dot_pct = (dot_count / t_balls)*100
+
+        # Singles %
+        sing_count = singles.get(idx, 0)
+        singles_pct = (sing_count / t_balls)*100
+
+        # Boundaries %
+        bound_count = boundaries.get(idx, 0)
+        bound_pct = (bound_count / t_balls)*100
+
+        # Boundaries (First&Last) %
+        bound_fl_count = boundaries_fl.get(idx, 0)
+        bound_fl_pct = (bound_fl_count / t_balls)*100
+
+        # Economy Rate (runs conceded per 100 balls)
+        runs_cons = total_runs_conceded.get(idx, 0)
+        economy_rate = (runs_cons / t_balls)*100
+
+        # Append results as separate rows for each KPI
+        results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Dot Balls', 'Value': round(dot_pct,2)})
+        results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Singles', 'Value': round(singles_pct,2)})
+        results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Boundaries', 'Value': round(bound_pct,2)})
+        results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Boundaries (First & Last Ball)', 'Value': round(bound_fl_pct,2)})
+        results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Economy Rate', 'Value': round(economy_rate,2)})
+
+    df_res = pd.DataFrame(results, columns=['Team','Phase','Metric','Value'])
+    return df_res
+
+
+import pandas as pd
+import logging
+import sqlite3
+
+
+
+
+
+# ... [Your existing code up to the KPI Visualization] ...
+
+# ###############################################################################
+# KPI Visualization for Batting and Bowling Phases with Historical Averages
+# ###############################################################################
+
+# ###############################################################################
+# KPI Visualization for Batting and Bowling Phases with Historical Averages
+# ###############################################################################
+
+def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling=False):
+
+    # Filter the DataFrame for the specified metric
+    dff = df[df['Metric'] == metric_name]
+
+    if dff.empty:
+        # If there's no data for the metric, return an empty figure with a message
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"No data available for {metric_name}",
+            xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(size=20)
+        )
+        return fig
+
+    # Create the grouped bar chart
+    fig = px.bar(
+        dff,
+        x='Phase',
+        y='Value',
+        color='Team',
+        barmode='group',
+        title=f"{metric_name} Comparison (per 100 balls)",
+        labels={'Value': metric_name},
+        category_orders={"Phase": ["Powerplay", "Middle", "Death"]}
+    )
+
+    # Prepare historical averages
+    # Define the mapping from metric to historical average column
+    if is_bowling:
+        avg_column_map = {
+            'Dot Balls': 'avg_dot_pct',
+            'Singles': 'avg_singles_pct',
+            'Boundaries': 'avg_boundaries_pct',
+            'Boundaries (First & Last Ball)': 'avg_boundaries_fl_pct',
+            'Economy Rate': 'avg_economy_rate'
+        }
+    else:
+        avg_column_map = {
+            'Dot Balls': 'avg_dot_pct',
+            'Singles': 'avg_singles_pct',
+            'Boundaries': 'avg_boundaries_pct',
+            'Boundaries (First & Last Ball)': 'avg_boundaries_fl_pct',
+            'Strike Rate': 'avg_strike_rate'
+        }
+
+    phases = ["Powerplay", "Middle", "Death"]
+    for phase in phases:
+        # Average for losing teams
+        loser_avg = hist_df[
+            (hist_df['phase'] == phase) & (hist_df['is_winner'] == False)
+            ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
+
+        # Average for winning teams
+        winner_avg = hist_df[
+            (hist_df['phase'] == phase) & (hist_df['is_winner'] == True)
+            ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
+
+        # Add red line for losing average
+        if not pd.isna(loser_avg):
+            fig.add_trace(go.Scatter(
+                x=[phase],
+                y=[loser_avg],
+                mode='markers+lines',
+                name=f'Avg Loser - {phase}',
+                line=dict(color='red', dash='dash'),
                 marker=dict(size=10)
             ))
-        fig_wicket_fall.update_layout(
-            title="Wicket Fall Over Time",
-            xaxis_title="Over",
-            yaxis_title="Runs at Wicket Fall",
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig_wicket_fall, use_container_width=True)
-    else:
-        st.info("No wickets have fallen yet.")
 
-    # --- Powerplay Performance ---
-    st.subheader("Powerplay Performance")
-
-    # Typically, powerplay is the first 6 overs. Adjust if necessary.
-    powerplay_overs = 6
-
-    powerplay_query = """
-    SELECT
-        innings_id,
-        SUM(runs_bat) as powerplay_runs,
-        SUM(CASE WHEN short_description LIKE '%OUT%' THEN 1 ELSE 0 END) as powerplay_wickets
-    FROM ball_by_ball
-    WHERE over_number < ?
-    GROUP BY innings_id
-    """
-    df_powerplay = pd.read_sql_query(powerplay_query, conn, params=(powerplay_overs,))
-
-    if not df_powerplay.empty:
-        fig_powerplay = go.Figure()
-        for index, row in df_powerplay.iterrows():
-            fig_powerplay.add_trace(go.Bar(
-                name=f'Innings {row["innings_id"]}',
-                x=['Runs', 'Wickets'],
-                y=[row['powerplay_runs'], row['powerplay_wickets']],
-                text=[row['powerplay_runs'], row['powerplay_wickets']],
-                textposition='auto'
+        # Add green line for winning average
+        if not pd.isna(winner_avg):
+            fig.add_trace(go.Scatter(
+                x=[phase],
+                y=[winner_avg],
+                mode='markers+lines',
+                name=f'Avg Winner - {phase}',
+                line=dict(color='green', dash='dash'),
+                marker=dict(size=10)
             ))
-        fig_powerplay.update_layout(
-            title="Powerplay Performance",
-            yaxis_title="Score",
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig_powerplay, use_container_width=True)
-    else:
-        st.info("Powerplay data not available yet.")
 
-    # --- Economy Rate of Bowlers ---
-    st.subheader("Bowlers' Economy Rate")
-    economy_rate_query = """
-    SELECT 
-        bowler_participant_id,
-        bowler_short_name,
-        SUM(runs_bat + wides + no_balls) as runs_conceded,
-        COUNT(DISTINCT over_number) as overs_bowled
-    FROM ball_by_ball
-    WHERE bowler_participant_id IS NOT NULL
-    GROUP BY bowler_participant_id, bowler_short_name
-    """
-    df_economy = pd.read_sql_query(economy_rate_query, conn)
+    # Update layout to ensure legends are displayed correctly
+    fig.update_layout(showlegend=True)
 
-    if not df_economy.empty:
-        df_economy['economy_rate'] = df_economy['runs_conceded'] / df_economy['overs_bowled']
-        fig_economy = px.bar(
-            df_economy,
-            x='bowler_short_name',
-            y='economy_rate',
-            title="Bowlers' Economy Rate",
-            labels={'bowler_short_name': 'Bowler', 'economy_rate': 'Economy Rate'},
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig_economy, use_container_width=True)
-    else:
-        st.info("Bowling data not available yet.")
+    return fig
 
-    # --- Boundary Distribution ---
-    st.subheader("Boundary Distribution")
-    boundary_distribution_query = """
-    SELECT
-        CASE
-            WHEN runs_bat BETWEEN 4 AND 5 THEN '4s'
-            WHEN runs_bat = 6 THEN '6s'
-            ELSE 'Other'
-        END as boundary_type,
-        COUNT(*) as count
-    FROM ball_by_ball
-    WHERE runs_bat >= 4
-    GROUP BY boundary_type
-    """
-    df_boundary = pd.read_sql_query(boundary_distribution_query, conn)
 
-    if not df_boundary.empty:
-        fig_boundary = px.pie(
-            df_boundary,
-            names='boundary_type',
-            values='count',
-            title="Boundary Distribution",
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig_boundary, use_container_width=True)
-    else:
-        st.info("No boundaries have been scored yet.")
+# ------------------------------------------------------------------------
+# EXAMPLE USAGE IN YOUR STREAMLIT APP
+# This code snippet is meant to replace the KPI visualization portion
+# ------------------------------------------------------------------------
 
-# -------------------------------------------------
-#   TEAM-BASED KPIs (Side-by-Side Columns)
-# -------------------------------------------------
-# ... [Rest of the code remains the same]
+@st.cache_data
+def load_historical_data(batting_csv='historical_batting_averages.csv', bowling_csv='historical_bowling_averages.csv'):
+    try:
+        batting_df = pd.read_csv(batting_csv)
+        bowling_df = pd.read_csv(bowling_csv)
 
-# -------------------------------
-#   TEAM-BASED KPIs (Side-by-Side Columns)
-# -------------------------------
+        # Ensure 'is_winner' is boolean
+        batting_df['is_winner'] = batting_df['is_winner'].astype(bool)
+        bowling_df['is_winner'] = bowling_df['is_winner'].astype(bool)
 
-st.header("Team-Based KPIs")
+        logging.info("Successfully loaded historical CSV files.")
+        return batting_df, bowling_df
+    except FileNotFoundError as fe:
+        logging.error(f"CSV file not found: {fe}")
+        st.error(f"CSV file not found: {fe}")
+        return pd.DataFrame(), pd.DataFrame()
+    except Exception as e:
+        logging.error(f"Error loading historical CSV files: {e}")
+        st.error(f"Error loading historical CSV files: {e}")
+        return pd.DataFrame(), pd.DataFrame()
+
+
+# Load historical averages
+hist_batting_df, hist_bowling_df = load_historical_data()
 
 if match_id:
-    # 1) Identify the two teams from the DB
-    teams_df = pd.read_sql_query(
-        "SELECT id, display_name FROM teams WHERE match_id = ? LIMIT 2",
-        conn,
-        params=(match_id,)
-    )
-    if len(teams_df) == 2:
-        # Assign aliases for clarity
-        team_a_id = teams_df.iloc[0]['id']
-        team_b_id = teams_df.iloc[1]['id']
-        team_a_name = teams_df.iloc[0]['display_name']
-        team_b_name = teams_df.iloc[1]['display_name']
+    st.header("Team Performance Comparison")
 
-        # Create 2 columns
-        col1, col2 = st.columns(2)
-
-        # ---- Team A KPIs ----
-        with col1:
-            st.subheader(team_a_name)
-
-            # Dot Ball % for Team A
-            dot_query_a = """
-            SELECT
-                SUM(
-                    CASE WHEN (bb.runs_bat = 0 AND bb.wides = 0 AND bb.no_balls = 0
-                               AND bb.leg_byes = 0 AND bb.byes = 0)
-                    THEN 1 ELSE 0 END
-                ) AS dot_balls,
-                COUNT(*) AS total_balls
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ? AND bb.wides = 0 AND bb.no_balls = 0
-            """
-            df_dot_a = pd.read_sql_query(dot_query_a, conn, params=(team_a_id,))
-            if not df_dot_a.empty and df_dot_a['total_balls'][0] > 0:
-                dot_pct_a = (df_dot_a['dot_balls'][0] / df_dot_a['total_balls'][0]) * 100
-            else:
-                dot_pct_a = 0
-            st.metric(label="Dot Ball %", value=f"{dot_pct_a:.2f}%")
-
-            # Boundary % for Team A
-            boundary_query_a = """
-            SELECT
-                SUM(
-                    CASE WHEN bb.runs_bat >= 4 THEN 1 ELSE 0 END
-                ) AS boundaries,
-                COUNT(*) AS total_balls
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ? AND bb.wides = 0 AND bb.no_balls = 0
-            """
-            df_boundary_a = pd.read_sql_query(boundary_query_a, conn, params=(team_a_id,))
-            if not df_boundary_a.empty and df_boundary_a['total_balls'][0] > 0:
-                boundary_pct_a = (df_boundary_a['boundaries'][0] / df_boundary_a['total_balls'][0]) * 100
-            else:
-                boundary_pct_a = 0
-            st.metric(label="Boundary %", value=f"{boundary_pct_a:.2f}%")
-
-            # Partnerships for Team A
-            partnership_query_a = """
-            SELECT
-                striker_short_name || ' & ' || non_striker_short_name AS partnership,
-                SUM(runs_bat) AS partnership_runs
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ?
-            GROUP BY striker_short_name, non_striker_short_name
-            ORDER BY partnership_runs DESC
-            LIMIT 5
-            """
-            df_partnership_a = pd.read_sql_query(partnership_query_a, conn, params=(team_a_id,))
-            st.write("Top Partnerships:")
-            st.dataframe(df_partnership_a)
-
-            # Average Runs and Wickets per 5 Overs for Team A
-            five_over_query_a = """
-            SELECT
-                (over_number / 5) * 5 AS over_interval,
-                AVG(runs_bat) AS avg_runs_per_over,
-                AVG(CASE WHEN short_description LIKE '%OUT%' THEN 1 ELSE 0 END) AS avg_wickets_per_over
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ?
-            GROUP BY over_interval
-            ORDER BY over_interval
-            """
-            df_five_over_a = pd.read_sql_query(five_over_query_a, conn, params=(team_a_id,))
-            st.write("Average Runs and Wickets per 5 Overs:")
-            st.dataframe(df_five_over_a)
-
-        # ---- Team B KPIs ----
-        with col2:
-            st.subheader(team_b_name)
-
-            # Dot Ball % for Team B
-            dot_query_b = """
-            SELECT
-                SUM(
-                    CASE WHEN (bb.runs_bat = 0 AND bb.wides = 0 AND bb.no_balls = 0
-                               AND bb.leg_byes = 0 AND bb.byes = 0)
-                    THEN 1 ELSE 0 END
-                ) AS dot_balls,
-                COUNT(*) AS total_balls
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ? AND bb.wides = 0 AND bb.no_balls = 0
-            """
-            df_dot_b = pd.read_sql_query(dot_query_b, conn, params=(team_b_id,))
-            if not df_dot_b.empty and df_dot_b['total_balls'][0] > 0:
-                dot_pct_b = (df_dot_b['dot_balls'][0] / df_dot_b['total_balls'][0]) * 100
-            else:
-                dot_pct_b = 0
-            st.metric(label="Dot Ball %", value=f"{dot_pct_b:.2f}%")
-
-            # Boundary % for Team B
-            boundary_query_b = """
-            SELECT
-                SUM(
-                    CASE WHEN bb.runs_bat >= 4 THEN 1 ELSE 0 END
-                ) AS boundaries,
-                COUNT(*) AS total_balls
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ? AND bb.wides = 0 AND bb.no_balls = 0
-            """
-            df_boundary_b = pd.read_sql_query(boundary_query_b, conn, params=(team_b_id,))
-            if not df_boundary_b.empty and df_boundary_b['total_balls'][0] > 0:
-                boundary_pct_b = (df_boundary_b['boundaries'][0] / df_boundary_b['total_balls'][0]) * 100
-            else:
-                boundary_pct_b = 0
-            st.metric(label="Boundary %", value=f"{boundary_pct_b:.2f}%")
-
-            # Partnerships for Team B
-            partnership_query_b = """
-            SELECT
-                striker_short_name || ' & ' || non_striker_short_name AS partnership,
-                SUM(runs_bat) AS partnership_runs
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ?
-            GROUP BY striker_short_name, non_striker_short_name
-            ORDER BY partnership_runs DESC
-            LIMIT 5
-            """
-            df_partnership_b = pd.read_sql_query(partnership_query_b, conn, params=(team_b_id,))
-            st.write("Top Partnerships:")
-            st.dataframe(df_partnership_b)
-
-            # Average Runs and Wickets per 5 Overs for Team B
-            five_over_query_b = """
-            SELECT
-                (over_number / 5) * 5 AS over_interval,
-                AVG(runs_bat) AS avg_runs_per_over,
-                AVG(CASE WHEN short_description LIKE '%OUT%' THEN 1 ELSE 0 END) AS avg_wickets_per_over
-            FROM ball_by_ball AS bb
-            JOIN innings AS inn ON bb.innings_id = inn.id
-            WHERE inn.batting_team_id = ?
-            GROUP BY over_interval
-            ORDER BY over_interval
-            """
-            df_five_over_b = pd.read_sql_query(five_over_query_b, conn, params=(team_b_id,))
-            st.write("Average Runs and Wickets per 5 Overs:")
-            st.dataframe(df_five_over_b)
-
+    # 1) Team map
+    team_map = get_team_ids_and_names(conn)
+    if not team_map:
+        st.warning("No teams found for this match.")
     else:
-        st.info("Could not find two teams in the database yet. Wait for data to load.")
-else:
-    st.info("Enter a valid match URL to see team-based KPIs.")
+        batting_df = calculate_phase_metrics(conn, team_map)
+        if batting_df.empty:
+            st.warning("No batting data found in ball_by_ball.")
+        else:
+            st.subheader("Batting KPIs by Phase")
+            batting_kpis = [
+                "Dot Balls",
+                "Singles",
+                "Boundaries",
+                "Boundaries (First & Last Ball)",
+                "Strike Rate"
+            ]
+            # Fetch historical batting averages
+
+            for i in range(0, len(batting_kpis), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    kpi_index = i + j
+                    if kpi_index < len(batting_kpis):
+                        kpi_name = batting_kpis[kpi_index]
+                        fig = create_comparison_chart_with_historical(
+                            df=batting_df,
+                            metric_name=kpi_name,
+                            hist_df=hist_batting_df,
+                            is_bowling=False
+                        )
+                        col.plotly_chart(fig, use_container_width=True)
+
+        # ---------------------------
+        #   B) BOWLING KPIs
+        # ---------------------------
+        bowling_df = calculate_bowling_phase_metrics(conn, team_map)
+        if bowling_df.empty:
+            st.warning("No bowling data found in ball_by_ball.")
+        else:
+            st.subheader("Bowling KPIs by Phase")
+            bowling_kpis = [
+                "Dot Balls",
+                "Singles",
+                "Boundaries",
+                "Boundaries (First & Last Ball)",
+                "Economy Rate"
+            ]
+
+
+            for i in range(0, len(bowling_kpis), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    kpi_index = i + j
+                    if kpi_index < len(bowling_kpis):
+                        kpi_name = bowling_kpis[kpi_index]
+                        fig = create_comparison_chart_with_historical(
+                            df=bowling_df,
+                            metric_name=kpi_name,
+                            hist_df=hist_bowling_df,
+                            is_bowling=True
+                        )
+                        col.plotly_chart(fig, use_container_width=True)
+                    # ---------------------------
+                    #   C) BOWLING PARTNERSHIPS
+                    # ---------------------------
+
+            bowler_map = get_bowler_map(conn)
+
+            partnerships_df = calculate_bowling_partnerships(conn, bowler_map)
+            best_partnerships, worst_partnerships = identify_best_worst_partnerships(partnerships_df, top_n=20)
+            visualize_bowling_partnerships(best_partnerships, worst_partnerships)
