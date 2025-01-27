@@ -79,8 +79,7 @@ def call_api(url):
 def create_db():
     try:
         # Connect to SQLite3 database
-        db_path = r'try.db'
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(':memory:', check_same_thread=False)
         cursor = conn.cursor()
 
         # Create tables (same as original script)
@@ -710,8 +709,7 @@ def insert_fielding_stats(cursor, innings_id, fielding_data):
     except Exception as e:
         logging.error(f"Error inserting fielding stats for innings ID {innings_id}: {e}")
 
-db_path = r'aw_shield.db'
-new_conn = sqlite3.connect(db_path)
+
 def insert_fall_of_wickets(cursor, innings_id, fall_of_wickets_data):
     try:
         for fall in fall_of_wickets_data:
@@ -1136,8 +1134,7 @@ if 'stop_event' not in st.session_state:
 if 'live_task' not in st.session_state:
     st.session_state.live_task = None
 def get_db_connection():
-    db_path = 'try.db'
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(':memory:', check_same_thread=False)
     return conn
 
 
