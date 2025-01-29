@@ -14,6 +14,10 @@ from streamlit_autorefresh import st_autorefresh  # Import the autorefresh compo
 import plotly.express as px
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+import tempfile
+import uuid
+import os
+import atexit
 
 def safe_get(d, keys, default=None):
     """Safely retrieve nested data from dictionaries or lists."""
@@ -76,9 +80,42 @@ def call_api(url):
         logging.error(f"API request failed: {e}")
         return {}
 
-def create_db():
+
+def get_temp_db_connection():
+    """Creates a unique temporary SQLite database file and returns the connection."""
+    # Generate a unique filename using UUID
+    unique_id = str(uuid.uuid4())
+    temp_dir = tempfile.gettempdir()
+    db_filename = f"live_match_{unique_id}.db"
+    db_path = os.path.join(temp_dir, db_filename)
+
+    # Create a connection to the temporary database file
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+
+    # Store the db_path in session state for cleanup later
+    st.session_state.db_path = db_path
+
+    # Register the temporary file for deletion on exit
+    def cleanup():
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+                logging.info(f"Temporary database {db_path} deleted.")
+        except Exception as e:
+            logging.error(f"Error deleting temporary database {db_path}: {e}")
+
+    atexit.register(cleanup)
+
+    return conn
+
+
+def get_db_connection():
+    return st.session_state.conn
+
+
+def create_db(conn):
     try:
-        # Connect to SQLite3 database
+
         cursor = conn.cursor()
 
         # Create tables (same as original script)
@@ -851,7 +888,6 @@ def do_insertion(cursor, conn, match_json, match_id, season):
         raise
 
 def clear_database(conn):
-    """Clear all data from the database tables."""
     cursor = conn.cursor()
     try:
         cursor.executescript('''
@@ -1132,13 +1168,16 @@ if 'stop_event' not in st.session_state:
 
 if 'live_task' not in st.session_state:
     st.session_state.live_task = None
-def get_db_connection():
-    conn = sqlite3.connect(':memory:', check_same_thread=False)
-    return conn
 
 
-conn = get_db_connection()
-create_db()
+# Initialize the database connection once per user session
+if 'conn' not in st.session_state:
+    st.session_state.conn = get_temp_db_connection()
+    create_db(st.session_state.conn)
+    logging.info("Temporary database initialized and tables created.")
+
+conn = st.session_state.conn
+cursor = conn.cursor()
 
 # User input
 match_url = st.text_input("Enter match URL:", "")
@@ -1184,7 +1223,7 @@ if stop_button:
         st.session_state.live_task = None
         st.success("Live data collection stopped.")
 
-        # Clear the try.db database
+        # Clear the database if needed
         clear_database(conn)
         st.info("Database has been cleared.")
     else:
@@ -1545,6 +1584,12 @@ def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling
 
     return fig
 
+import streamlit as st
+import sqlite3
+import os
+import tempfile
+
+
 
 # ------------------------------------------------------------------------
 # EXAMPLE USAGE IN YOUR STREAMLIT APP
@@ -1649,5 +1694,5 @@ if match_id:
             bowler_map = get_bowler_map(conn)
 
             partnerships_df = calculate_bowling_partnerships(conn, bowler_map)
-            best_partnerships, worst_partnerships = identify_best_worst_partnerships(partnerships_df, top_n=20)
+            best_partnerships, worst_partnerships = identify_best_worst_partnerships(partnerships_df, top_n=40)
             visualize_bowling_partnerships(best_partnerships, worst_partnerships)
