@@ -79,7 +79,6 @@ def call_api(url):
 def create_db():
     try:
         # Connect to SQLite3 database
-        conn = sqlite3.connect(':memory:', check_same_thread=False)
         cursor = conn.cursor()
 
         # Create tables (same as original script)
