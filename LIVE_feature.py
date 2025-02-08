@@ -18,6 +18,18 @@ import tempfile
 import uuid
 import os
 import atexit
+# 1) Import your RDS queries
+from rds_queries import (
+    get_db_connection as get_rds_engine,  # rename for clarity
+    get_historical_batting_averages,
+    get_historical_bowling_averages
+)
+st.set_page_config(layout="wide", page_title="Decidr - The Decisions Maker", page_icon="🏏")
+
+
+
+
+
 
 def safe_get(d, keys, default=None):
     """Safely retrieve nested data from dictionaries or lists."""
@@ -802,7 +814,6 @@ def insert_ball_by_ball(cursor, ball, innings_id, fetched_time,innings_data):
         # Check if the ball already exists
         cursor.execute("SELECT id FROM ball_by_ball WHERE id = ?", (ball_id,))
         if cursor.fetchone():
-            logging.info(f"Ball ID {ball_id} already exists. Skipping insertion.")
             return
 
         # Insert the ball
@@ -847,7 +858,6 @@ def insert_ball_by_ball(cursor, ball, innings_id, fetched_time,innings_data):
             safe_get(ball, ['shortDescription']),
             safe_get(ball, ['description'])
         ))
-        logging.info(f"Inserted new ball with ID {ball_id} at {safe_get(ball, ['ballTime'])}")
     except Exception as e:
         logging.error(f"Error inserting ball ID {ball_id}: {e}")
 
@@ -912,78 +922,116 @@ def fill_a_first_db(match_id, season_name, conn,match_json,cursor):
     do_insertion(cursor, conn, match_json, match_id, season_name)
 
 
-def calculate_bowling_partnerships(conn, bowler_map):
-
+def calculate_bowling_partnerships_fixed(conn, bowler_map):
+    """
+    Identify bowling partnerships based on segments where a change of bowler occurs
+    within each innings (i.e., never crossing innings boundaries).
+    """
     query = """
         SELECT
             innings_id,
             over_number,
+            ball_display_number,
             bowler_participant_id,
             bowler_short_name,
             progress_wickets,
             runs_bat,
             wides,
-            no_balls,
-            ball_display_number
+            no_balls
         FROM ball_by_ball
         ORDER BY innings_id, over_number, ball_display_number
     """
     df = pd.read_sql_query(query, conn)
-
     if df.empty:
-        logging.warning("No bowling data found in 'ball_by_ball' table.")
         return pd.DataFrame(columns=['Bowler 1', 'Bowler 2', 'Wickets', 'Dot Ball %', 'Economy Rate'])
 
-    # Compute 'runs_conceded'
-    df['runs_conceded'] = df['runs_bat'] + df['wides'] + df['no_balls']
+    segments = []
 
-    # Compute 'wickets_taken' as the difference in 'progress_wickets' within the same innings
-    df['wickets_taken'] = df.groupby('innings_id')['progress_wickets'].diff().fillna(df['progress_wickets']).astype(int)
-    df['wickets_taken'] = df['wickets_taken'].apply(lambda x: x if x >= 0 else 0)
+    # Group by innings to avoid mixing data across innings
+    for innings_id, g in df.groupby('innings_id', sort=False):
+        g = g.reset_index(drop=True)
 
-    # Shift the bowler to get the next bowler within the same innings
-    df['next_bowler_id'] = df.groupby('innings_id')['bowler_participant_id'].shift(-1)
-    df['next_bowler_name'] = df.groupby('innings_id')['bowler_short_name'].shift(-1)
+        # Start index of the current "partnership segment"
+        seg_start = 0
 
-    # Exclude rows where bowler IDs or names are None
-    partnerships = df.dropna(subset=['bowler_participant_id', 'next_bowler_id', 'bowler_short_name', 'next_bowler_name'])
+        for i in range(1, len(g)):
+            curr_bowler = g.loc[i, 'bowler_participant_id']
+            prev_bowler = g.loc[i - 1, 'bowler_participant_id']
 
-    # Further exclude rows where the next bowler is the same as the current bowler
-    partnerships = partnerships[partnerships['bowler_participant_id'] != partnerships['next_bowler_id']]
+            # If the bowler changes, record the segment
+            if curr_bowler != prev_bowler:
+                segment_df = g.iloc[seg_start:i + 1]  # i+1 includes the ball where we see the change
+                bowler1 = segment_df.iloc[0]['bowler_participant_id']  # bowler who started the segment
+                bowler2 = segment_df.iloc[-1]['bowler_participant_id']  # new bowler at the change
 
-    # Now, group by bowler pairs
-    partnerships['bowler_pair'] = partnerships.apply(
-        lambda row: tuple(sorted([row['bowler_participant_id'], row['next_bowler_id']])), axis=1
-    )
+                # Calculate metrics over this segment
+                total_balls = len(segment_df)
+                runs_conceded = (segment_df['runs_bat']
+                                 + segment_df['wides']
+                                 + segment_df['no_balls']).sum()
 
-    # Aggregate partnership statistics
-    partnership_stats = partnerships.groupby('bowler_pair').agg(
-        Wickets=('wickets_taken', 'sum'),
-        Dot_Balls=('runs_conceded', lambda x: (x == 0).sum()),
-        Total_Balls=('runs_conceded', 'count'),
-        Runs_Conceded=('runs_conceded', 'sum')
-    ).reset_index()
+                # Dot balls
+                dot_balls = segment_df.apply(
+                    lambda row: 1 if (row['runs_bat'] == 0 and row['wides'] == 0 and row['no_balls'] == 0) else 0,
+                    axis=1
+                ).sum()
 
-    # Calculate Dot Ball Percentage and Economy Rate
-    partnership_stats['Dot_Ball_%'] = (partnership_stats['Dot_Balls'] / partnership_stats['Total_Balls']) * 100
-    partnership_stats['Economy_Rate'] = (partnership_stats['Runs_Conceded'] / partnership_stats['Total_Balls']) * 6  # Per over
+                # Wickets: difference in progress_wickets from start to end of segment
+                wickets = (segment_df.iloc[-1]['progress_wickets']
+                           - segment_df.iloc[0]['progress_wickets'])
 
-    # Map bowler IDs to names using bowler_map
-    partnership_stats['Bowler 1'] = partnership_stats['bowler_pair'].apply(lambda x: bowler_map.get(x[0], f"Bowler {x[0]}"))
-    partnership_stats['Bowler 2'] = partnership_stats['bowler_pair'].apply(lambda x: bowler_map.get(x[1], f"Bowler {x[1]}"))
+                pair = tuple(sorted((bowler1, bowler2)))
+                segments.append({
+                    'pair': pair,
+                    'total_balls': total_balls,
+                    'runs_conceded': runs_conceded,
+                    'dot_balls': dot_balls,
+                    'wickets': wickets
+                })
 
-    # Select and reorder columns
-    final_df = partnership_stats[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']]
+                # Start new segment from here
+                seg_start = i
+
+        # Optional: If you want to record the segment from seg_start to the end
+        # of the innings, do it here. (But typically the "partnership" ends when
+        # the bowler changes. If the innings ends, that last partial segment might
+        # or might not be useful.)
+        # ...
+
+    if not segments:
+        return pd.DataFrame(columns=['Bowler 1', 'Bowler 2', 'Wickets', 'Dot Ball %', 'Economy Rate'])
+
+    # Aggregate segments by bowler pair
+    seg_df = pd.DataFrame(segments)
+    grouped = seg_df.groupby('pair', as_index=False).agg({
+        'wickets': 'sum',
+        'dot_balls': 'sum',
+        'total_balls': 'sum',
+        'runs_conceded': 'sum'
+    })
+
+    # Dot ball % and Economy Rate
+    grouped['Dot_Ball_%'] = grouped['dot_balls'] / grouped['total_balls'] * 100
+    grouped['Economy_Rate'] = grouped['runs_conceded'] / grouped['total_balls'] * 6
+
+    # Map bowler IDs to short names
+    grouped['Bowler 1'] = grouped['pair'].apply(lambda x: bowler_map.get(x[0], f"Bowler {x[0]}"))
+    grouped['Bowler 2'] = grouped['pair'].apply(lambda x: bowler_map.get(x[1], f"Bowler {x[1]}"))
+
+    # Reorder columns
+    final_df = grouped[['Bowler 1', 'Bowler 2', 'wickets', 'Dot_Ball_%', 'Economy_Rate']]
+    final_df.rename(columns={'wickets': 'Wickets'}, inplace=True)
 
     return final_df
 
+METRICS_TO_IGNORE = {}
 
 def identify_best_worst_partnerships(partnerships_df, top_n=20):
-
     if partnerships_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Normalize the metrics with safeguards against division by zero
+    # Normalize metrics (make sure that higher is better):
+    # For wickets and dot ball %, higher is good; for economy, lower is good so we invert it.
     partnerships_df['Wickets_norm'] = partnerships_df['Wickets'].apply(
         lambda x: (x - partnerships_df['Wickets'].min()) / (partnerships_df['Wickets'].max() - partnerships_df['Wickets'].min())
         if partnerships_df['Wickets'].max() != partnerships_df['Wickets'].min() else 0
@@ -997,13 +1045,13 @@ def identify_best_worst_partnerships(partnerships_df, top_n=20):
         if partnerships_df['Economy_Rate'].max() != partnerships_df['Economy_Rate'].min() else 0
     )
 
-    # Compute a composite score
+    # Compute a composite score (simple average of normalized metrics)
     partnerships_df['Composite_Score'] = partnerships_df[['Wickets_norm', 'Dot_Ball_%_norm', 'Economy_Rate_norm']].mean(axis=1)
 
-    # Best partnerships
+    # Best partnerships (highest composite score)
     best_partnerships = partnerships_df.nlargest(top_n, 'Composite_Score')
 
-    # Worst partnerships
+    # Worst partnerships (lowest composite score)
     worst_partnerships = partnerships_df.nsmallest(top_n, 'Composite_Score')
 
     return best_partnerships, worst_partnerships
@@ -1011,31 +1059,70 @@ def identify_best_worst_partnerships(partnerships_df, top_n=20):
 
 def visualize_bowling_partnerships(best_df, worst_df):
     """
-    Visualize the best and worst bowling partnerships.
+    Visualize the best and worst bowling partnerships using cards.
     """
     st.subheader("Bowling Partnerships")
+
+    # --- CSS Styling (make sure no extra indentation) ---
+    st.markdown("""
+<style>
+.card-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    justify-content: flex-start;
+}
+.card {
+    background-color: #262730;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1rem;
+    width: 220px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    color: #fff;
+}
+.card h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1.1rem;
+    color: #eee;
+}
+.card p {
+    margin: 0.2rem 0;
+    font-size: 0.9rem;
+}
+.card strong {
+    color: #007BFF;
+}
+</style>
+""", unsafe_allow_html=True)
 
     if best_df.empty and worst_df.empty:
         st.info("No bowling partnerships data available.")
         return
 
+    # --- Helper function to create a single card ---
+    def create_card(row):
+        return f"""
+<div class="card">
+    <h3>{row['Bowler 1']} & {row['Bowler 2']}</h3>
+    <p><strong>Wickets:</strong> {row['Wickets']}</p>
+    <p><strong>Dot Ball %:</strong> {row['Dot_Ball_%']:.1f}%</p>
+    <p><strong>Economy Rate:</strong> {row['Economy_Rate']:.2f}</p>
+</div>
+"""
+
     # Display Best Partnerships
     if not best_df.empty:
-        st.markdown("### Best Partnerships")
-        st.dataframe(best_df[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']])
-
-        # Plot Best Partnerships
-
+        st.markdown("<h3 style='color: #007BFF;'>Best Partnerships</h3>", unsafe_allow_html=True)
+        best_cards_html = "".join(create_card(row) for _, row in best_df.iterrows())
+        st.markdown(f'<div class="card-container">{best_cards_html}</div>', unsafe_allow_html=True)
 
     # Display Worst Partnerships
     if not worst_df.empty:
-        st.markdown("### Worst Partnerships")
-        st.dataframe(worst_df[['Bowler 1', 'Bowler 2', 'Wickets', 'Dot_Ball_%', 'Economy_Rate']])
-
-        # Plot Worst Partnerships
-
-
-
+        st.markdown("<h3 style='color: #DC3545;'>Worst Partnerships</h3>", unsafe_allow_html=True)
+        worst_cards_html = "".join(create_card(row) for _, row in worst_df.iterrows())
+        st.markdown(f'<div class="card-container">{worst_cards_html}</div>', unsafe_allow_html=True)
 def get_bowler_map(conn):
     """
     Returns a dictionary mapping {bowler_participant_id: bowler_short_name} for all bowlers in the match.
@@ -1146,13 +1233,61 @@ def run_async_loop(loop):
     """Run the asyncio event loop in a background thread."""
     asyncio.set_event_loop(loop)
     loop.run_forever()
-st.set_page_config(layout="wide", page_title="Decidr - The Decisions Maker", page_icon="🏏")
 
-st.title("Live Match Data Viewer")
+st.title("**Decidr** : Live Match Data Viewer")
 
 # Auto-refresh every 5s
 st_autorefresh(interval=5000, limit=None, key="autorefresh_key")
+if 'hist_loaded' not in st.session_state:
+    st.session_state['hist_loaded'] = False
+if 'hist_batting_df' not in st.session_state:
+    st.session_state['hist_batting_df'] = pd.DataFrame()
+if 'hist_bowling_df' not in st.session_state:
+    st.session_state['hist_bowling_df'] = pd.DataFrame()
+if 'rds_engine' not in st.session_state:
+    st.session_state['rds_engine'] = None
+if 'grade_options' not in st.session_state:
+    st.session_state['grade_options'] = []
 
+@st.cache_data
+def load_historical_batting(_engine, grade_like_pattern):
+    return get_historical_batting_averages(_engine, grade_like_pattern)
+
+@st.cache_data
+def load_historical_bowling(_engine, grade_like_pattern):
+    return get_historical_bowling_averages(_engine, grade_like_pattern)
+
+#Removed caching.
+def get_available_grades(engine):
+    query = "SELECT DISTINCT name FROM public.grades ORDER BY name;"
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    return df['name'].tolist()
+
+st.subheader("Historical Competition Selection")
+
+# Only show grade selection and loading if not already loaded
+if not st.session_state.hist_loaded:
+    if st.session_state.rds_engine is None:
+        st.session_state.rds_engine = get_rds_engine()
+    engine = st.session_state.rds_engine
+
+    if not st.session_state.grade_options:
+        try:
+            st.session_state.grade_options = get_available_grades(engine)
+        except Exception as e:
+            st.error(f"Error loading grades: {e}")
+            st.session_state.grade_options = [] # Set to empty list to avoid further errors
+
+    selected_grade = st.selectbox("Choose a Grade:", st.session_state.grade_options)
+
+    if st.button("Load Averages Now"):
+        grade_like_pattern = f"%{selected_grade}%"
+        # Load directly into session state
+        st.session_state.hist_batting_df = load_historical_batting(_engine=engine, grade_like_pattern=grade_like_pattern)
+        st.session_state.hist_bowling_df = load_historical_bowling(_engine=engine, grade_like_pattern=grade_like_pattern)
+        st.session_state.hist_loaded = True
+        st.success(f"Averages for {selected_grade} loaded!")
 # Session State
 if 'async_loop' not in st.session_state:
     st.session_state.async_loop = asyncio.new_event_loop()
@@ -1175,6 +1310,7 @@ if 'conn' not in st.session_state:
     st.session_state.conn = get_temp_db_connection()
     create_db(st.session_state.conn)
     logging.info("Temporary database initialized and tables created.")
+
 
 conn = st.session_state.conn
 cursor = conn.cursor()
@@ -1251,126 +1387,481 @@ def get_team_ids_and_names(conn):
     team_map = {row['id']: row['display_name'] for _, row in df.iterrows()}
     return team_map
 
+def get_current_phase(conn):
+    """
+    Returns a string 'Powerplay', 'Middle', or 'Death' based on the highest
+    over_number in ball_by_ball so far.
+    """
+    query = "SELECT MAX(over_number) AS last_over FROM ball_by_ball"
+    df = pd.read_sql_query(query, conn)
+    last_over = df['last_over'].iloc[0]
+
+    if last_over is None:
+        # If no data yet, assume Powerplay to start
+        return "Powerplay"
+    elif last_over <= 10:
+        return "Powerplay"
+    elif last_over <= 40:
+        return "Middle"
+    else:
+        return "Death"
+
+def get_phase_metrics_for_team(batting_df, team_name, current_phase):
+    """
+    Returns the subset of metrics from batting_df for the given team & current_phase.
+    """
+    subset = batting_df[
+        (batting_df['Team'] == team_name) &
+        (batting_df['Phase'] == current_phase)
+    ]
+    return subset
+
+
+def generate_suggestion(metric, current_val, winner_val, total_balls_in_phase=0):
+    """
+    Return a short text describing how far below/above we are
+    vs. the winning average, and a quick coach-like tip.
+
+    Arguments:
+    ----------
+    metric : str
+        The name of the metric, e.g. "Dot Balls", "Run Rate", etc.
+    current_val : float
+        The team's current value for this metric.
+    winner_val : float
+        The winning average for this metric in the same phase.
+    total_balls_in_phase : int, optional
+        The total number of deliveries faced in this phase, used
+        to convert a % gap into a rough count of deliveries (for Dot Balls, etc.).
+
+    Returns:
+    --------
+    str : A short, human-readable suggestion or comment.
+    """
+
+    # If we have no winner_val data (NaN or None), skip suggestions
+    if winner_val is None or pd.isna(winner_val):
+        return "No historical winner data available for this metric."
+
+    diff = current_val - winner_val  # how far above/below we are
+
+    # ----------
+    # 1) DOT BALLS (assumes a percentage, e.g. 58.99 for 58.99%)
+    # ----------
+    if metric == "Dot Balls":
+        # If 'diff' is negative, we are below the winning average (meaning we have fewer dot balls).
+        # Convert that % difference into approximate # of deliveries if you know how many were faced.
+        if diff < 0:
+            needed = abs(diff) / 100 * total_balls_in_phase
+            needed = round(needed)  # approximate integer
+            return (
+                f"We're ~{needed} dot balls short of the winning average. "
+                f"Aim for tighter bowling or more disciplined line to increase dot deliveries."
+            )
+        else:
+            return (
+                "Our dot ball percentage is above the winning average—great job! "
+                "Keep building pressure by minimizing scoring opportunities."
+            )
+
+    # ----------
+    # 2) SINGLES (also a percentage)
+    # ----------
+    elif metric == "Singles":
+        if diff < 0:
+            needed = abs(diff) / 100 * total_balls_in_phase
+            needed = round(needed)
+            return (
+                f"Singles rate is behind the winning average by about {abs(diff):.1f}%. "
+                f"Try rotating strike more often—roughly {needed} additional singles could match the winners."
+            )
+        else:
+            return (
+                "Singles rate is higher than winning average—good strike rotation. "
+                "Keep it up and maintain the momentum."
+            )
+
+    # ----------
+    # 3) BOUNDARIES (also a percentage, e.g. 15% of all balls faced)
+    # ----------
+    elif metric == "Boundaries":
+        if diff < 0:
+            needed = abs(diff) / 100 * total_balls_in_phase
+            needed = round(needed)
+            return (
+                f"We're behind the winners' boundary rate by {abs(diff):.1f}%. "
+                f"Look to be more aggressive in {needed} extra deliveries to match the winning trend."
+            )
+        else:
+            return (
+                "Boundary rate is above winning average—excellent aggression. "
+                "Keep finding those gaps and punishing loose balls."
+            )
+
+    # ----------
+    # 4) BOUNDARIES (FIRST & LAST BALL) - special strategic focus
+    #    Also a percentage or simply an absolute count. Assuming you handle it as a % of overs?
+    # ----------
+    elif metric == "Boundaries (First & Last Ball)":
+        if diff < 0:
+            return (
+                "Below winning average for boundaries at the start/end of overs. "
+                "Focus on capitalizing on the first & last ball for momentum swings."
+            )
+        else:
+            return (
+                "Doing well scoring boundaries on over boundaries—keep that intensity "
+                "at the critical start/end of each over."
+            )
+
+    # ----------
+    # 5) RUN RATE (e.g. 5.2 runs per over)
+    # ----------
+    elif metric == "Run Rate":
+        if diff < 0:
+            return (
+                f"Run rate is below winning average by {abs(diff):.2f}. "
+                "Aim to score a few extra runs per over—look for quick singles or boundary opportunities."
+            )
+        else:
+            return (
+                "Run rate is above winning average—maintain this pressure. "
+                "Keep rotating strike and seize boundary balls."
+            )
+
+    # ----------
+    # 6) WICKETS LOST (absolute count, e.g. 3 wickets lost)
+    #    Lower is usually better, so if diff<0 => you lost fewer wickets => good!
+    #    If diff>0 => you lost more wickets => not good.
+    # ----------
+    elif metric == "Wickets Lost":
+        # Note the interpretation is reversed: if we have lost more wickets (diff>0),
+        # we are actually doing worse than winners' average (they lost fewer).
+        if diff > 0:
+            return (
+                f"You've lost {diff} more wickets than winning average. "
+                "Try to consolidate—focus on partnerships and minimize risky shots."
+            )
+        else:
+            return (
+                "Fewer wickets lost than the winning average—well done! "
+                "Keep batting discipline to preserve wickets."
+            )
+
+    # ----------
+    # 7) STRIKE RATE (runs per 100 balls for a particular batter or for the team)
+    #    If diff<0 => behind winning average => push for more runs
+    # ----------
+    elif metric == "Strike Rate":
+        if diff < 0:
+            return (
+                f"Strike rate is below winning average by {abs(diff):.1f}. "
+                "Look for quick boundaries or singles to lift the scoring tempo."
+            )
+        else:
+            return (
+                "Strike rate is above winning average—excellent scoring tempo!"
+            )
+
+    # ----------
+    # DEFAULT: If no recognized metric, return empty or a generic statement
+    # ----------
+    return "No specific suggestion available for this metric."
+
+
+def display_current_phase_section(conn, team_name, batting_df, hist_batting_df):
+    """
+    Enhanced UI display for the current phase KPIs for a team.
+    Displays a header with the current phase and team name, and a grid of metric cards.
+    """
+    import pandas as pd  # ensure pandas is imported
+
+    # 1) Determine the current phase
+    current_phase = get_current_phase(conn)
+
+    # 2) Render a header with a gradient background and a shadow
+    st.markdown(f"""
+<div class="phase-header">
+  <h2>Current Phase: {current_phase}</h2>
+  <p>Team: {team_name}</p>
+</div>
+""", unsafe_allow_html=True)
+
+    # 3) Filter the data for the current phase and team
+    current_df = get_phase_metrics_for_team(batting_df, team_name, current_phase)
+    filtered_df = current_df[~current_df['Metric'].isin(METRICS_TO_IGNORE)]
+    if filtered_df.empty:
+        st.write("No KPIs available for this phase.")
+        return
+
+    # 4) Define a mapping from metric names to icons
+    icons = {
+        "Dot Balls": "⚫",
+        "Singles": "1️⃣",
+        "Boundaries": "🏏",
+        "Boundaries (First & Last Ball)": "🔚🔜",
+        "Strike Rate": "⚡",
+        "Run Rate": "🏃",
+        "Wickets Lost": "❌"
+    }
+
+    # 5) Insert custom CSS for the header and KPI cards
+    st.markdown("""
+<style>
+/* Header styling */
+.phase-header {
+    background: linear-gradient(135deg, #0066ff, #00ccff);
+    padding: 1rem;
+    border-radius: 12px;
+    text-align: center;
+    color: #fff;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+}
+
+/* Container for cards */
+.phase-card-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    justify-content: center;
+}
+
+/* Card styling */
+.phase-card {
+    background: #1e1e2f;
+    border-radius: 12px;
+    padding: 1.2rem;
+    width: 300px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.phase-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+}
+.phase-card .metric-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+}
+.phase-card .metric-header h2 {
+    font-size: 2.5rem;
+    margin: 0;
+    color: #ffcc00;
+}
+.phase-card .metric-header span {
+    font-size: 1.2rem;
+    color: #ccc;
+}
+.phase-card .metric-details {
+    font-size: 0.9rem;
+    color: #ddd;
+    margin-bottom: 0.5rem;
+}
+.phase-card .suggestion {
+    font-style: italic;
+    color: #aaa;
+}
+</style>
+""", unsafe_allow_html=True)
+
+    # 6) Define a container for the cards
+    card_html = '<div class="phase-card-container">'
+
+    # 7) Define a mapping from metric names to historical average columns
+    hist_col_map = {
+        "Dot Balls": "avg_dot_pct",
+        "Singles": "avg_singles_pct",
+        "Boundaries": "avg_boundaries_pct",
+        "Boundaries (First & Last Ball)": "avg_boundaries_fl_pct",
+        "Strike Rate": "avg_strike_rate",
+        "Run Rate": "avg_run_rate",
+        "Wickets Lost": "avg_wickets_lost"
+    }
+
+    # 8) Loop over each unique metric and create a card for each
+    for metric_name in filtered_df['Metric'].unique():
+        # Pick the first row for the metric
+        row = filtered_df[filtered_df['Metric'] == metric_name].iloc[0]
+        current_val = row['Value']
+        column_name = hist_col_map.get(metric_name)
+        if not column_name:
+            continue
+
+        # Get the winner’s average for this phase
+        winner_phase_df = hist_batting_df[
+            (hist_batting_df['phase'] == current_phase) &
+            (hist_batting_df['is_winner'] == True)
+            ]
+        winner_val = winner_phase_df[column_name].mean()
+
+        # Calculate the difference and choose an arrow indicator
+        diff = current_val - winner_val if winner_val and not pd.isna(winner_val) else 0
+        arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "")
+        diff_formatted = f"{diff:.2f}"
+        winner_formatted = f"{winner_val:.2f}" if winner_val and not pd.isna(winner_val) else "N/A"
+
+        # Generate suggestion text using your existing function
+        suggestion_text = generate_suggestion(
+            metric=metric_name,
+            current_val=current_val,
+            winner_val=winner_val,
+            total_balls_in_phase=0  # Adjust if you have ball counts
+        )
+
+        # Get icon (or empty string if not defined)
+        icon = icons.get(metric_name, "")
+
+        # Build the card HTML
+        card_html += f"""
+<div class="phase-card">
+  <div class="metric-header">
+    <h2>{icon} {current_val}</h2>
+    <span>{metric_name}</span>
+  </div>
+  <div class="metric-details">
+    Winner Avg: {winner_formatted} | Diff: {diff_formatted} {arrow}
+  </div>
+  <div class="suggestion">
+    {suggestion_text}
+  </div>
+</div>
+"""
+    card_html += "</div>"  # close container
+
+    st.markdown(card_html, unsafe_allow_html=True)
+
 
 def calculate_phase_metrics(conn, team_map):
     """
-    Calculate the 5 KPIs directly from 'ball_by_ball' without referencing 'innings'.
-
-    Returns a DataFrame with columns: ['Team', 'Phase', 'Metric', 'Value'].
+    Calculate batting KPIs (Dot Balls, Singles, Boundaries, Boundaries (First & Last Ball),
+    Strike Rate, Run Rate, Wickets Lost) by phase (Powerplay, Middle, Death).
     """
-    # 1. Base Query: Select necessary columns and categorize phases
+
+    # 1) Pull ball_by_ball data with additional columns
+    #    We'll also pull progress_wickets so we can calculate 'wickets lost'
     base_query = """
         SELECT
+            ball_by_ball.*,
             CASE
                 WHEN over_number BETWEEN 0 AND 10 THEN 'Powerplay'
                 WHEN over_number BETWEEN 11 AND 40 THEN 'Middle'
                 ELSE 'Death'
-            END AS phase,
-            batting_team_id,
-            over_number,
-            ball_display_number,
-            runs_bat,
-            wides,
-            no_balls
+            END AS phase
         FROM ball_by_ball
+        ORDER BY innings_id, over_number, ball_display_number
     """
-
     df = pd.read_sql_query(base_query, conn)
 
     if df.empty:
         logging.warning("No ball-by-ball data found in 'ball_by_ball' table.")
         return pd.DataFrame(columns=['Team', 'Phase', 'Metric', 'Value'])
 
-    # 2. Define KPI conditions
-    kpi_definitions = {
-        'Dot Balls': "(runs_bat = 0 AND wides = 0 AND no_balls = 0)",
-        'Singles': "(runs_bat = 1)",
-        'Boundaries': "(runs_bat IN (4,6))",
-        'Boundaries (First & Last Ball)': "(runs_bat IN (4,6) AND ball_display_number IN (1,6))",
-    }
+    # 2) Create helper columns
+    #    total_runs includes all runs scored off that delivery (bat + extras)
+    df['total_runs'] = (
+            df['runs_bat'].fillna(0)
+            + df['wides'].fillna(0)
+            + df['no_balls'].fillna(0)
+            + df['leg_byes'].fillna(0)
+            + df['byes'].fillna(0)
+            + df['penalty_runs'].fillna(0)
+    )
+
+    # is_legal_ball = 1 for a legal delivery, 0 for wides/noBalls
+    df['is_legal_ball'] = df.apply(
+        lambda row: 1 if (row['wides'] == 0 and row['no_balls'] == 0) else 0,
+        axis=1
+    )
+
+    # 3) Calculate 'wicket_fell' via difference in progress_wickets.
+    #    We do this per innings_id so we don't cross innings boundaries.
+    df['prev_progress_wickets'] = df.groupby('innings_id')['progress_wickets'].shift(1)
+    df['wicket_fell'] = df.apply(
+        lambda row: 1 if (row['prev_progress_wickets'] is not None
+                          and row['progress_wickets'] > row['prev_progress_wickets'])
+        else 0,
+        axis=1
+    )
+
+    # 4) Define conditions for the "old" KPIs
+    dot_condition = (df['runs_bat'] == 0) & (df['wides'] == 0) & (df['no_balls'] == 0)
+    singles_condition = (df['runs_bat'] == 1)
+    boundary_condition = df['runs_bat'].isin([4, 6])
+    boundary_fl_cond = boundary_condition & df['ball_display_number'].isin([1, 6])
+
+    # Group by (phase, batting_team_id)
+    group_cols = ['phase', 'batting_team_id']
+    grouped = df.groupby(group_cols, dropna=True)
+
+    # 5) Summaries for old KPIs
+    total_balls = grouped.size()  # includes all deliveries, legal or not
+    dot_balls = grouped.apply(lambda g: g[dot_condition].shape[0])
+    singles = grouped.apply(lambda g: g[singles_condition].shape[0])
+    boundaries = grouped.apply(lambda g: g[boundary_condition].shape[0])
+    boundaries_fl = grouped.apply(lambda g: g[boundary_fl_cond].shape[0])
+
+    # 6) Summaries for new KPIs
+    sum_total_runs = grouped['total_runs'].sum()
+    sum_legal_balls = grouped['is_legal_ball'].sum()
+    wickets_fallen = grouped['wicket_fell'].sum()  # total wickets in that phase
 
     results = []
 
-    # 3. Calculate each KPI
-    for metric_name, condition in kpi_definitions.items():
-        query = f"""
-            SELECT
-                phase,
-                batting_team_id,
-                COUNT(*) AS total_balls,
-                SUM(CASE WHEN {condition} THEN 1 ELSE 0 END) AS met_count
-            FROM (
-                {base_query}
-            )
-            GROUP BY phase, batting_team_id
-        """
-        metric_df = pd.read_sql_query(query, conn)
-
-        if metric_df.empty:
-            logging.info(f"No data for KPI: {metric_name}")
-            continue
-
-        for _, row in metric_df.iterrows():
-            team_id = row['batting_team_id']
-            team_name = team_map.get(team_id, f"Team {team_id}")
-            total_balls = row['total_balls']
-            met_count = row['met_count']
-            value_pct = (met_count / total_balls) * 100 if total_balls else 0
-
-            results.append({
-                'Team': team_name,
-                'Phase': row['phase'],
-                'Metric': metric_name,
-                'Value': round(value_pct, 2),
-            })
-
-    # 4. Calculate Strike Rate
-    sr_query = f"""
-        SELECT
-            phase,
-            batting_team_id,
-            SUM(runs_bat) AS total_runs,
-            COUNT(*) AS total_balls
-        FROM (
-            {base_query}
-        )
-        GROUP BY phase, batting_team_id
-    """
-    sr_df = pd.read_sql_query(sr_query, conn)
-
-    for _, row in sr_df.iterrows():
-        team_id = row['batting_team_id']
+    # 7) Calculate metrics for each group
+    for idx in total_balls.index:
+        phase, team_id = idx
         team_name = team_map.get(team_id, f"Team {team_id}")
-        total_runs = row['total_runs']
-        total_balls = row['total_balls']
-        sr_value = (total_runs / total_balls) * 100 if total_balls else 0
 
-        results.append({
-            'Team': team_name,
-            'Phase': row['phase'],
-            'Metric': 'Strike Rate',
-            'Value': round(sr_value, 2),
-        })
+        t_balls = total_balls[idx]
+        dot_count = dot_balls.get(idx, 0)
+        singles_count = singles.get(idx, 0)
+        bound_count = boundaries.get(idx, 0)
+        bound_fl_cnt = boundaries_fl.get(idx, 0)
 
-    # 5. Convert results to DataFrame
+        # Old KPIs as percentages
+        dot_pct = (dot_count / t_balls) * 100 if t_balls else 0
+        singles_pct = (singles_count / t_balls) * 100 if t_balls else 0
+        boundary_pct = (bound_count / t_balls) * 100 if t_balls else 0
+        boundary_fl_pct = (bound_fl_cnt / t_balls) * 100 if t_balls else 0
+
+        # Strike Rate (runs_bat only) => total runs from the bat / total balls * 100
+        # or, as you had before, you used sum(runs_bat)?
+        # We'll replicate the older approach: sum(runs_bat) / t_balls * 100
+        total_runs_bat = grouped['runs_bat'].sum().get(idx, 0)
+        strike_rate = (total_runs_bat / t_balls) * 100 if t_balls else 0
+
+        # New metrics
+        legal_balls = sum_legal_balls.get(idx, 0)
+        total_runs_incl = sum_total_runs.get(idx, 0)  # includes extras
+        wickets_lost = wickets_fallen.get(idx, 0)
+
+        # Run Rate = total_runs_incl / overs, overs = legal_balls / 6
+        overs = legal_balls / 6.0 if legal_balls else 0
+        run_rate = (total_runs_incl / overs) if overs > 0 else 0
+
+        # Store each as an individual row
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Dot Balls', 'Value': round(dot_pct, 2)})
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Singles', 'Value': round(singles_pct, 2)})
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Boundaries', 'Value': round(boundary_pct, 2)})
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Boundaries (First & Last Ball)',
+                        'Value': round(boundary_fl_pct, 2)})
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Strike Rate', 'Value': round(strike_rate, 2)})
+
+        # The two new ones:
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Run Rate', 'Value': round(run_rate, 2)})
+        results.append({'Team': team_name, 'Phase': phase, 'Metric': 'Wickets Lost', 'Value': wickets_lost})
+
     metrics_df = pd.DataFrame(results)
-
-    if metrics_df.empty:
-        logging.warning("No KPI data was calculated.")
-
     return metrics_df
 
 
 import plotly.express as px
 import plotly.graph_objects as go
 def calculate_bowling_phase_metrics(conn, team_map):
-    """
-    Calculate bowling KPIs (Dot Balls, Singles, Boundaries, Boundaries (First & Last Ball),
-    Economy Rate) for each PHASE (Powerplay, Middle, Death).
 
-    Returns DataFrame with columns: ['Team','Phase','Metric','Value'].
-    """
-    # 1) Load ball_by_ball
     base_query = """
         SELECT
             CASE
@@ -1409,13 +1900,6 @@ def calculate_bowling_phase_metrics(conn, team_map):
     # runs_conceded = runs_bat + wides + no_balls
     df['runs_conceded'] = df['runs_bat'] + df['wides'] + df['no_balls']
 
-    # 3) We define KPI conditions from the "bowling" perspective:
-    # Dot Balls, Singles, Boundaries, Boundaries(First&LastBall), plus Economy Rate
-    #   - Dot ball for bowling if runs_bat=0, no wides/noBalls
-    #   - Single for bowling if runs_bat=1
-    #   - Boundaries for runs_bat in (4,6)
-    #   - Boundaries (First & Last) for runs_bat in (4,6) AND ball_display_number in (1,6)
-    #   - Economy Rate = sum(runs_conceded) / total_deliveries * 100 (per 100 balls)
 
     # We group by (phase, bowling_team_id)
     group_cols = ['phase','bowling_team_id']
@@ -1467,7 +1951,7 @@ def calculate_bowling_phase_metrics(conn, team_map):
 
         # Economy Rate (runs conceded per 100 balls)
         runs_cons = total_runs_conceded.get(idx, 0)
-        economy_rate = (runs_cons / t_balls)*100
+        economy_rate = (runs_cons / t_balls)*6
 
         # Append results as separate rows for each KPI
         results.append({'Team': bowl_team_name, 'Phase': ph, 'Metric': 'Dot Balls', 'Value': round(dot_pct,2)})
@@ -1482,29 +1966,31 @@ def calculate_bowling_phase_metrics(conn, team_map):
 
 import pandas as pd
 import logging
-import sqlite3
 
 
+def get_team_names(conn):
+    query = """
+        SELECT display_name 
+        FROM teams
+    """
+    df = pd.read_sql_query(query, conn)
 
+    if df.empty or len(df) < 2:
+        raise ValueError(
+            "Could not retrieve team names. Ensure the 'teams' table is populated with at least two teams.")
 
+    # Extract team names
+    team_a_name = df.iloc[0]['display_name']
+    team_b_name = df.iloc[1]['display_name']
 
-# ... [Your existing code up to the KPI Visualization] ...
+    return team_a_name, team_b_name
 
-# ###############################################################################
-# KPI Visualization for Batting and Bowling Phases with Historical Averages
-# ###############################################################################
-
-# ###############################################################################
-# KPI Visualization for Batting and Bowling Phases with Historical Averages
-# ###############################################################################
 
 def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling=False):
-
     # Filter the DataFrame for the specified metric
     dff = df[df['Metric'] == metric_name]
 
     if dff.empty:
-        # If there's no data for the metric, return an empty figure with a message
         fig = go.Figure()
         fig.add_annotation(
             text=f"No data available for {metric_name}",
@@ -1526,8 +2012,7 @@ def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling
         category_orders={"Phase": ["Powerplay", "Middle", "Death"]}
     )
 
-    # Prepare historical averages
-    # Define the mapping from metric to historical average column
+    # Prepare historical averages by defining the mapping
     if is_bowling:
         avg_column_map = {
             'Dot Balls': 'avg_dot_pct',
@@ -1537,25 +2022,28 @@ def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling
             'Economy Rate': 'avg_economy_rate'
         }
     else:
+        # Expanded mapping now includes Run Rate and Wickets Lost
         avg_column_map = {
             'Dot Balls': 'avg_dot_pct',
             'Singles': 'avg_singles_pct',
             'Boundaries': 'avg_boundaries_pct',
             'Boundaries (First & Last Ball)': 'avg_boundaries_fl_pct',
-            'Strike Rate': 'avg_strike_rate'
+            'Strike Rate': 'avg_strike_rate',
+            'Run Rate': 'avg_run_rate',
+            'Wickets Lost': 'avg_wickets_lost'
         }
 
     phases = ["Powerplay", "Middle", "Death"]
     for phase in phases:
-        # Average for losing teams
+        # Get historical average for loser teams
         loser_avg = hist_df[
             (hist_df['phase'] == phase) & (hist_df['is_winner'] == False)
-            ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
+        ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
 
-        # Average for winning teams
+        # Get historical average for winner teams
         winner_avg = hist_df[
             (hist_df['phase'] == phase) & (hist_df['is_winner'] == True)
-            ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
+        ][avg_column_map.get(metric_name, 'avg_strike_rate')].mean()
 
         # Add red line for losing average
         if not pd.isna(loser_avg):
@@ -1579,9 +2067,7 @@ def create_comparison_chart_with_historical(df, metric_name, hist_df, is_bowling
                 marker=dict(size=10)
             ))
 
-    # Update layout to ensure legends are displayed correctly
     fig.update_layout(showlegend=True)
-
     return fig
 
 import streamlit as st
@@ -1591,38 +2077,8 @@ import tempfile
 
 
 
-# ------------------------------------------------------------------------
-# EXAMPLE USAGE IN YOUR STREAMLIT APP
-# This code snippet is meant to replace the KPI visualization portion
-# ------------------------------------------------------------------------
-
-@st.cache_data
-def load_historical_data(batting_csv='historical_batting_averages.csv', bowling_csv='historical_bowling_averages.csv'):
-    try:
-        batting_df = pd.read_csv(batting_csv)
-        bowling_df = pd.read_csv(bowling_csv)
-
-        # Ensure 'is_winner' is boolean
-        batting_df['is_winner'] = batting_df['is_winner'].astype(bool)
-        bowling_df['is_winner'] = bowling_df['is_winner'].astype(bool)
-
-        logging.info("Successfully loaded historical CSV files.")
-        return batting_df, bowling_df
-    except FileNotFoundError as fe:
-        logging.error(f"CSV file not found: {fe}")
-        st.error(f"CSV file not found: {fe}")
-        return pd.DataFrame(), pd.DataFrame()
-    except Exception as e:
-        logging.error(f"Error loading historical CSV files: {e}")
-        st.error(f"Error loading historical CSV files: {e}")
-        return pd.DataFrame(), pd.DataFrame()
-
-
-# Load historical averages
-hist_batting_df, hist_bowling_df = load_historical_data()
-
 if match_id:
-    st.header("Team Performance Comparison")
+
 
     # 1) Team map
     team_map = get_team_ids_and_names(conn)
@@ -1633,16 +2089,31 @@ if match_id:
         if batting_df.empty:
             st.warning("No batting data found in ball_by_ball.")
         else:
-            st.subheader("Batting KPIs by Phase")
+
+
+
             batting_kpis = [
                 "Dot Balls",
                 "Singles",
                 "Boundaries",
                 "Boundaries (First & Last Ball)",
-                "Strike Rate"
+                "Strike Rate",
+                "Run Rate",
+                "Wickets Lost"
             ]
-            # Fetch historical batting averages
 
+            # ...
+            team_a_name, team_b_name = get_team_names(conn)
+            hist_batting_df = st.session_state.get('hist_batting_df', pd.DataFrame())
+            hist_bowling_df = st.session_state.get('hist_bowling_df', pd.DataFrame())
+
+            display_current_phase_section(conn, team_a_name, batting_df, hist_batting_df)
+            display_current_phase_section(conn, team_b_name, batting_df, hist_batting_df)
+
+            # Now you can safely pass `hist_batting_df` to any function,
+            # since it’s defined in this scope
+            st.header("Team Performance Comparison")
+            st.subheader("Batting KPIs by Phase")
             for i in range(0, len(batting_kpis), 2):
                 cols = st.columns(2)
                 for j, col in enumerate(cols):
@@ -1652,10 +2123,11 @@ if match_id:
                         fig = create_comparison_chart_with_historical(
                             df=batting_df,
                             metric_name=kpi_name,
-                            hist_df=hist_batting_df,
+                            hist_df=hist_batting_df,  # now defined
                             is_bowling=False
                         )
                         col.plotly_chart(fig, use_container_width=True)
+
 
         # ---------------------------
         #   B) BOWLING KPIs
@@ -1693,6 +2165,6 @@ if match_id:
 
             bowler_map = get_bowler_map(conn)
 
-            partnerships_df = calculate_bowling_partnerships(conn, bowler_map)
-            best_partnerships, worst_partnerships = identify_best_worst_partnerships(partnerships_df, top_n=40)
+            partnerships_df = calculate_bowling_partnerships_fixed(conn, bowler_map)
+            best_partnerships, worst_partnerships = identify_best_worst_partnerships(partnerships_df, top_n=7)
             visualize_bowling_partnerships(best_partnerships, worst_partnerships)
