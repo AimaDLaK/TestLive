@@ -97,7 +97,6 @@ def call_api(url):
 
 
 def get_temp_db_connection():
-    """Creates a unique temporary SQLite database file and returns the connection."""
     # Generate a unique filename using UUID
     unique_id = str(uuid.uuid4())
     temp_dir = tempfile.gettempdir()
@@ -127,7 +126,11 @@ def get_temp_db_connection():
 def get_db_connection():
     return st.session_state.conn
 
-
+@st.cache_resource
+def get_temp_db():
+    conn = get_temp_db_connection()
+    create_db(conn)
+    return conn
 def create_db(conn):
     try:
 
@@ -1311,7 +1314,7 @@ if 'live_task' not in st.session_state:
 
 # Initialize the database connection once per user session
 if 'conn' not in st.session_state:
-    st.session_state.conn = get_temp_db_connection()
+    st.session_state.conn = get_temp_db()
     create_db(st.session_state.conn)
     conn = st.session_state.conn
     cursor = conn.cursor()
@@ -2086,7 +2089,7 @@ import tempfile
 
 
 
-if match_id:
+if match_id and not st.session_state.stop_event.is_set():
 
 
     # 1) Team map
