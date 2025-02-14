@@ -28,7 +28,10 @@ st.set_page_config(layout="wide", page_title="Decidr - The Decisions Maker", pag
 
 
 
-
+@st.cache_resource
+def get_cached_rds_engine():
+    engine = get_rds_engine()  # your function to create an engine
+    return engine
 
 
 def safe_get(d, keys, default=None):
@@ -1246,6 +1249,7 @@ if 'hist_bowling_df' not in st.session_state:
     st.session_state['hist_bowling_df'] = pd.DataFrame()
 if 'rds_engine' not in st.session_state:
     st.session_state['rds_engine'] = None
+    st.session_state.rds_engine = get_cached_rds_engine()
 if 'grade_options' not in st.session_state:
     st.session_state['grade_options'] = []
 
@@ -1309,11 +1313,12 @@ if 'live_task' not in st.session_state:
 if 'conn' not in st.session_state:
     st.session_state.conn = get_temp_db_connection()
     create_db(st.session_state.conn)
+    conn = st.session_state.conn
+    cursor = conn.cursor()
     logging.info("Temporary database initialized and tables created.")
 
-
 conn = st.session_state.conn
-cursor = conn.cursor()
+
 
 # User input
 match_url = st.text_input("Enter match URL:", "")
@@ -1358,7 +1363,11 @@ if stop_button:
         st.session_state.stop_event.set()
         st.session_state.live_task = None
         st.success("Live data collection stopped.")
-
+        # Dispose the RDS engine to close idle connections
+        if st.session_state.rds_engine is not None:
+            st.session_state.rds_engine.dispose()
+            st.session_state.rds_engine = None
+            st.info("RDS connections have been closed.")
         # Clear the database if needed
         clear_database(conn)
         st.info("Database has been cleared.")
