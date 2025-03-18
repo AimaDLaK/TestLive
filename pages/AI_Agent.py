@@ -49,15 +49,27 @@ def translate_to_sql(natural_query, schema):
     sql_query = clean_sql(raw_sql)
     return sql_query
 
+def is_select_query(sql_query: str) -> bool:
+    """
+    Check if the SQL query is a SELECT query.
+    This function trims leading whitespace and checks if the query starts with "select".
+    """
+    return sql_query.strip().lower().startswith("select")
+
 def run_query(sql_query):
     """
     Attempt to run the SQL query.
     Returns a tuple: (DataFrame, error_message).
     If execution succeeds, error_message is None.
+    Only SELECT queries are allowed.
     """
+    # Restrict execution to SELECT queries only
+    if not is_select_query(sql_query):
+        return pd.DataFrame(), "Only SELECT queries are allowed."
+    
     try:
         conn = psycopg2.connect(
-            host="readreplica.cl26gcqkaenv.ap-southeast-1.rds.amazonaws.com",
+            host="cricket-db.cl06e4yca5zc.ap-southeast-2.rds.amazonaws.com",
             dbname="cricket_rds",
             user="postgres",
             password="34poh2aGaHybsKxPB07B",
@@ -450,7 +462,9 @@ schema = """
         country text,
         playing_surface_id text
     );
-    """# Button to submit new query
+    """
+
+# Button to submit new query
 if st.button("Submit Query"):
     # Reset session state variables for a new query
     st.session_state.iteration = 0
